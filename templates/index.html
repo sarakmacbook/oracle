@@ -377,6 +377,16 @@
                         <option value="">-- Scan images first --</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                        <label class="form-label" style="margin-bottom:0;">Target subnet</label>
+                        <button class="btn" id="scanSubnetBtn" onclick="scanSubnets()" style="padding:3px 10px;font-size:11px;flex:none;">Scan subnets</button>
+                    </div>
+                    <select id="subnetSelect" class="form-select">
+                        <option value="">-- Auto-select first available --</option>
+                    </select>
+                    <div id="subnetInfo" style="margin-top:6px;font-size:11px;color:var(--text-muted);display:none;"></div>
+                </div>
             </div>
         </div>
 
@@ -577,8 +587,53 @@
         }
     }
 
-    function setMaxBoot() {
-        document.getElementById('bootVol').value = 200;
+    async function setMaxBoot() {
+        parseConfig();
+        const btn = event.target;
+        const input = document.getElementById('bootVol');
+        const user = document.getElementById('cfgUser').value;
+        const key = document.getElementById('cfgKey').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+
+        const oldText = btn.textContent;
+        btn.textContent = '...';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch('/api/free-tier-status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key
+                })
+            });
+            const data = await res.json();
+
+            if (data.success) {
+                const remaining = data.usage.storage.remaining_gb;
+                const maxBoot = Math.min(200, Math.max(50, remaining));
+                input.value = maxBoot;
+                btn.textContent = 'Max (' + maxBoot + ' GB)';
+                addLog('Max boot volume set to ' + maxBoot + ' GB (' + remaining + ' GB free)', 'success');
+                setTimeout(() => { btn.textContent = oldText; }, 3000);
+            } else {
+                addLog('Could not detect storage: ' + data.error, 'error');
+                btn.textContent = oldText;
+            }
+        } catch (err) {
+            addLog('Request error: ' + err.message, 'error');
+            btn.textContent = oldText;
+        }
+
+        btn.disabled = false;
     }
 
     function validateDelay() {
@@ -745,6 +800,63 @@
         btn.textContent = 'Scan OS images';
     }
 
+    async function scanSubnets() {
+        parseConfig();
+        const btn = document.getElementById('scanSubnetBtn');
+        const select = document.getElementById('subnetSelect');
+        const info = document.getElementById('subnetInfo');
+        const user = document.getElementById('cfgUser').value;
+        const key = document.getElementById('cfgKey').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+        select.innerHTML = '<option>Scanning...</option>';
+        info.style.display = 'none';
+
+        try {
+            const res = await fetch('/api/list-subnets', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key
+                })
+            });
+            const data = await res.json();
+
+            if (data.success && data.subnets.length > 0) {
+                select.innerHTML = '<option value="">-- Auto-select first available --</option>';
+                data.subnets.forEach(sn => {
+                    const opt = document.createElement('option');
+                    opt.value = sn.id;
+                    const pub = sn.public ? 'Public' : 'Private';
+                    opt.textContent = sn.name + ' (' + sn.cidr + ', ' + pub + ', ' + sn.ad + ')';
+                    select.appendChild(opt);
+                });
+                info.innerHTML = 'Found ' + data.subnets.length + ' subnet(s). Select one or leave auto-selected.';
+                info.style.display = 'block';
+                addLog('Found ' + data.subnets.length + ' subnet(s)', 'success');
+            } else {
+                select.innerHTML = '<option value="">-- No subnets found --</option>';
+                addLog('No subnets found: ' + (data.error || 'None available'), 'warn');
+            }
+        } catch (err) {
+            select.innerHTML = '<option value="">-- Error --</option>';
+            addLog('Subnet scan error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Scan subnets';
+    }
+
     function onAllOSChange() {
         document.getElementById('imageSelect').innerHTML = '<option value="">-- Scan images --</option>';
     }
@@ -803,6 +915,7 @@
             private_key: key,
             shape: document.getElementById('shapeSelect').value,
             image_id: image,
+            subnet_id: document.getElementById('subnetSelect').value,
             display_name: document.getElementById('vmName').value,
             ocpus: document.getElementById('ocpus').value,
             memory: document.getElementById('memory').value,

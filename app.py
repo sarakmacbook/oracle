@@ -157,6 +157,50 @@ def list_available_images():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/list-subnets', methods=['POST'])
+@require_auth
+def list_available_subnets():
+    data = request.json or {}
+    config = build_config(data)
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+        identity_client = oci.identity.IdentityClient(config)
+
+        tenancy = config['tenancy']
+        ads = identity_client.list_availability_domains(compartment_id=tenancy).data
+
+        vcns = network_client.list_vcns(compartment_id=tenancy).data
+        if not vcns:
+            return jsonify({'success': False, 'error': 'No VCNs found in this tenancy'})
+
+        all_subnets = []
+        for vcn in vcns:
+            subnets = network_client.list_subnets(
+                compartment_id=tenancy,
+                vcn_id=vcn.id
+            ).data
+            for sn in subnets:
+                if getattr(sn, 'lifecycle_state', '') != 'AVAILABLE':
+                    continue
+                all_subnets.append({
+                    'id': sn.id,
+                    'name': sn.display_name or 'Unnamed',
+                    'cidr': sn.cidr_block or 'N/A',
+                    'vcn_name': vcn.display_name or 'Unnamed VCN',
+                    'vcn_id': vcn.id,
+                    'ad': sn.availability_domain or 'Regional',
+                    'public': getattr(sn, 'prohibit_public_ip_on_vnic', False) == False,
+                    'dns': sn.dns_label or 'N/A'
+                })
+
+        return jsonify({'success': True, 'subnets': all_subnets})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def check_free_tier_limits(config, account_config, compute_client, block_client, identity_client):
     tenancy = config['tenancy']
     requested_shape = account_config.get('shape')
@@ -381,19 +425,23 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         ).data
         ad_name = ads[0].name if ads else ''
 
-        vcns = network_client.list_vcns(compartment_id=config['tenancy']).data
-        if not vcns:
-            add_log("Error: No VCN found.")
-            return
-
-        subnets = network_client.list_subnets(
-            compartment_id=config['tenancy'],
-            vcn_id=vcns[0].id
-        ).data
-        if not subnets:
-            add_log("Error: No subnet found.")
-            return
-        subnet_id = subnets[0].id
+        subnet_id = account_config.get('subnet_id')
+        if not subnet_id:
+            vcns = network_client.list_vcns(compartment_id=config['tenancy']).data
+            if not vcns:
+                add_log("Error: No VCN found.")
+                return
+            subnets = network_client.list_subnets(
+                compartment_id=config['tenancy'],
+                vcn_id=vcns[0].id
+            ).data
+            if not subnets:
+                add_log("Error: No subnet found.")
+                return
+            subnet_id = subnets[0].id
+            add_log("Auto-selected subnet: " + subnet_id[:20] + "...")
+        else:
+            add_log("Using selected subnet: " + subnet_id[:20] + "...")
 
         image_id = account_config.get('image_id')
         if not image_id:
