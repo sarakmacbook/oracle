@@ -201,6 +201,102 @@ def list_available_subnets():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/test-launch', methods=['POST'])
+@require_auth
+def test_launch():
+    """Debug endpoint: validates launch params without actually creating instance."""
+    data = request.json or {}
+    config = build_config(data)
+
+    try:
+        oci.config.validate_config(config)
+        compute_client = oci.core.ComputeClient(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+        identity_client = oci.identity.IdentityClient(config)
+        block_client = oci.core.BlockstorageClient(config)
+
+        tenancy = config['tenancy']
+        ads = identity_client.list_availability_domains(compartment_id=tenancy).data
+        ad_name = ads[0].name if ads else ''
+
+        vcns = network_client.list_vcns(compartment_id=tenancy).data
+        subnets = []
+        if vcns:
+            subnets = network_client.list_subnets(compartment_id=tenancy, vcn_id=vcns[0].id).data
+
+        image_id = data.get('image_id')
+        shape = data.get('shape')
+        subnet_id = data.get('subnet_id')
+
+        # Validate image exists
+        image_valid = False
+        image_details = None
+        if image_id:
+            try:
+                img = compute_client.get_image(image_id=image_id).data
+                image_valid = getattr(img, 'lifecycle_state', '') == 'AVAILABLE'
+                image_details = {
+                    'display_name': img.display_name,
+                    'os': getattr(img, 'operating_system', 'N/A'),
+                    'os_version': getattr(img, 'operating_system_version', 'N/A'),
+                    'size_in_mbs': getattr(img, 'size_in_mbs', 'N/A'),
+                    'lifecycle_state': getattr(img, 'lifecycle_state', 'N/A')
+                }
+            except Exception as e:
+                image_details = {'error': str(e)[:100]}
+
+        # Validate subnet
+        subnet_valid = False
+        subnet_details = None
+        if subnet_id:
+            try:
+                sn = network_client.get_subnet(subnet_id=subnet_id).data
+                subnet_valid = getattr(sn, 'lifecycle_state', '') == 'AVAILABLE'
+                subnet_details = {
+                    'display_name': sn.display_name,
+                    'cidr_block': getattr(sn, 'cidr_block', 'N/A'),
+                    'availability_domain': getattr(sn, 'availability_domain', 'Regional'),
+                    'prohibit_public_ip': getattr(sn, 'prohibit_public_ip_on_vnic', False),
+                    'lifecycle_state': getattr(sn, 'lifecycle_state', 'N/A')
+                }
+            except Exception as e:
+                subnet_details = {'error': str(e)[:100]}
+
+        # Check shape compatibility with image
+        shape_compat = []
+        if image_id:
+            try:
+                shapes = compute_client.list_image_shape_compatibility_entries(image_id=image_id).data
+                shape_compat = [s.shape for s in shapes]
+            except Exception as e:
+                shape_compat = ['Error: ' + str(e)[:80]]
+
+        # Free tier check
+        ok, err = check_free_tier_limits(config, data, compute_client, block_client, identity_client)
+
+        return jsonify({
+            'success': True,
+            'debug': {
+                'region': config.get('region'),
+                'ad': ad_name,
+                'ads_available': [ad.name for ad in ads],
+                'vcns_found': len(vcns),
+                'subnets_found': len(subnets),
+                'image_valid': image_valid,
+                'image_details': image_details,
+                'subnet_valid': subnet_valid,
+                'subnet_details': subnet_details,
+                'shape': shape,
+                'shape_compatible_with_image': shape_compat,
+                'free_tier_ok': ok,
+                'free_tier_error': err
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def check_free_tier_limits(config, account_config, compute_client, block_client, identity_client):
     tenancy = config['tenancy']
     requested_shape = account_config.get('shape')
@@ -464,8 +560,13 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             add_log("Boot volume raised to minimum 50 GB.")
             boot_gb = 50
 
-        add_log(f"Setup Verified -> Subnet: {subnet_id[:15]}... | "
-                f"Image: {image_id[:15]}... | Zone: {ad_name}")
+        add_log(f"Setup Verified -> Subnet: {subnet_id[:20]}... | "
+                f"Image: {image_id[:20]}... | Zone: {ad_name}")
+        add_log(f"Debug -> Shape: {account_config['shape']} | Boot: {boot_gb}GB | "
+                f"OCPUs: {account_config.get('ocpus', 'N/A')} | RAM: {account_config.get('memory', 'N/A')}GB")
+        add_log(f"Debug -> Subnet details: assign_public_ip=True")
+        if shape_config:
+            add_log(f"Debug -> ARM shape config: ocpus={shape_config.ocpus}, memory={shape_config.memory_in_gbs}")
 
         is_arm = account_config.get('shape') == "VM.Standard.A1.Flex"
         shape_config = None
@@ -535,9 +636,19 @@ def run_automated_creation(config, account_config, compute_client, network_clien
 
             except oci.exceptions.ServiceError as e:
                 msg = str(e)
-                if "Out of capacity" in msg or e.status in (500, 429, 503, 504):
+                code = getattr(e, 'code', 'N/A')
+                status = getattr(e, 'status', 'N/A')
+                add_log(f"Debug -> ServiceError code={code}, status={status}, msg={e.message[:120]}")
+                if "Out of capacity" in msg or status in (500, 429, 503, 504):
                     user_info = f" [user: {oci_username}]" if oci_username else ""
                     add_log(f"Capacity busy in '{target_region}'.{user_info} Retrying...")
+                elif "NotAuthorizedOrNotFound" in msg or "Authorization failed" in msg or status == 404:
+                    add_log(f"Auth/NotFound error — possible causes:")
+                    add_log(f"  1. Image {image_id[:25]}... not found in AD {ad_name}")
+                    add_log(f"  2. Shape {account_config['shape']} not available in this AD")
+                    add_log(f"  3. Subnet {subnet_id[:25]}... missing permissions")
+                    add_log(f"  4. Check OCI Console > Instances > Create — test manually")
+                    break
                 else:
                     add_log(f"OCI API error: {e.message}")
                     break
