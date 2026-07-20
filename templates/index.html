@@ -523,6 +523,21 @@
         if (region) document.getElementById('cfgRegion').value = region[1].trim();
     }
 
+    function handleConfigFile() {
+        const file = document.getElementById('configFile').files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            document.getElementById('rawConfig').value = e.target.result;
+            parseConfig();
+            addLog('Config loaded from: ' + file.name, 'success');
+        };
+        reader.onerror = function() {
+            addLog('Failed to read config file', 'error');
+        };
+        reader.readAsText(file);
+    }
+
     function handleKeyFile() {
         const file = document.getElementById('keyFile').files[0];
         if (!file) return;
