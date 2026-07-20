@@ -565,8 +565,6 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         add_log(f"Debug -> Shape: {account_config['shape']} | Boot: {boot_gb}GB | "
                 f"OCPUs: {account_config.get('ocpus', 'N/A')} | RAM: {account_config.get('memory', 'N/A')}GB")
         add_log(f"Debug -> Subnet details: assign_public_ip=True")
-        if shape_config:
-            add_log(f"Debug -> ARM shape config: ocpus={shape_config.ocpus}, memory={shape_config.memory_in_gbs}")
 
         is_arm = account_config.get('shape') == "VM.Standard.A1.Flex"
         shape_config = None
@@ -576,6 +574,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(
                 ocpus=ocpus, memory_in_gbs=memory
             )
+            add_log(f"Debug -> ARM shape config: ocpus={ocpus}, memory={memory}")
 
         instance_details = oci.core.models.LaunchInstanceDetails(
             compartment_id=config['tenancy'],

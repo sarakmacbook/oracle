@@ -364,6 +364,7 @@
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:6px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                         <div style="font-size:12px;color:var(--text-muted);">Drop .pem, .txt, or .key file</div>
                     </div>
+                    <div style="margin-top:6px;font-size:11px;color:var(--text-muted);text-align:center;">Double-click upload zone to replace file</div>
                 </div>
                 <div class="btn-row">
                     <button class="btn" id="quotaBtn" onclick="checkQuota()">Check free tier</button>
@@ -439,6 +440,7 @@
                         <input type="file" id="sshFile" accept=".pub,.txt" onchange="handleSSHFile()">
                         <span style="font-size:12px;color:var(--text-muted);">Upload .pub file or paste below</span>
                     </div>
+                    <div style="margin-top:6px;font-size:11px;color:var(--text-muted);text-align:center;">Double-click upload zone to replace file</div>
                     <textarea id="sshKey" class="form-textarea ssh-area" placeholder="ssh-rsa AAAAB3..."></textarea>
                 </div>
                 <div class="grid-2">
@@ -564,6 +566,17 @@
         reader.readAsText(file);
     }
 
+    document.getElementById('keyZone').addEventListener('dblclick', function(e) {
+        if (e.target.tagName === 'INPUT') return;
+        document.getElementById('cfgKey').value = '';
+        this.classList.remove('success');
+        this.innerHTML = '<input type="file" id="keyFile" accept=".pem,.txt,.key" onchange="handleKeyFile()">' +
+            '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted);margin-bottom:6px;">' +
+            '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>' +
+            '<div style="font-size:12px;color:var(--text-muted);">Drop .pem, .txt, or .key file</div>';
+        addLog('Private key cleared — upload a new one', 'warn');
+    });
+
     function handleSSHFile() {
         const file = document.getElementById('sshFile').files[0];
         if (!file) return;
@@ -576,6 +589,15 @@
         };
         reader.readAsText(file);
     }
+
+    document.getElementById('sshZone').addEventListener('dblclick', function(e) {
+        if (e.target.tagName === 'INPUT') return;
+        document.getElementById('sshKey').value = '';
+        this.classList.remove('success');
+        this.innerHTML = '<input type="file" id="sshFile" accept=".pub,.txt" onchange="handleSSHFile()">' +
+            '<span style="font-size:12px;color:var(--text-muted);">Upload .pub file or paste below</span>';
+        addLog('SSH key cleared — upload a new one', 'warn');
+    });
 
     function onShapeChange() {
         const shape = document.getElementById('shapeSelect').value;
