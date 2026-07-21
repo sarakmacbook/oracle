@@ -331,6 +331,91 @@ def list_vnics():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/open-firewall', methods=['POST'])
+@require_auth
+def open_firewall():
+    """Add 0.0.0.0/0 ingress rule to subnet's security list."""
+    data = request.json or {}
+    config = build_config(data)
+    subnet_id = data.get('subnet_id')
+
+    if not subnet_id:
+        return jsonify({'success': False, 'error': 'subnet_id required'})
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+
+        # Get subnet details
+        subnet = network_client.get_subnet(subnet_id=subnet_id).data
+
+        # Try NSG first (modern approach)
+        nsg_id = getattr(subnet, 'network_security_group_ids', [])
+        if nsg_id and len(nsg_id) > 0:
+            # Add rule to first NSG
+            rule = oci.core.models.AddNetworkSecurityGroupSecurityRulesDetails(
+                security_rules=[
+                    oci.core.models.AddSecurityRuleDetails(
+                        direction='INGRESS',
+                        protocol='all',  # 1=ICMP, 6=TCP, 17=UDP, 'all'=all
+                        source='0.0.0.0/0',
+                        description='OCI Provisioner auto-open all traffic'
+                    )
+                ]
+            )
+            result = network_client.add_network_security_group_security_rules(
+                network_security_group_id=nsg_id[0],
+                add_network_security_group_security_rules_details=rule
+            )
+            return jsonify({
+                'success': True,
+                'method': 'NSG',
+                'nsg_id': nsg_id[0],
+                'rules_added': len(result.data.security_rules)
+            })
+
+        # Fallback to Security List (legacy approach)
+        sec_list_ids = getattr(subnet, 'security_list_ids', [])
+        if not sec_list_ids:
+            return jsonify({'success': False, 'error': 'No security list or NSG found on subnet'})
+
+        sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
+
+        # Check if 0.0.0.0/0 all-traffic rule already exists
+        existing = getattr(sec_list, 'ingress_security_rules', [])
+        for rule in existing:
+            if getattr(rule, 'source', '') == '0.0.0.0/0' and getattr(rule, 'protocol', '') == 'all':
+                return jsonify({'success': True, 'message': '0.0.0.0/0 all-traffic rule already exists', 'already_open': True})
+
+        # Add the rule
+        new_rules = existing + [
+            oci.core.models.IngressSecurityRule(
+                source='0.0.0.0/0',
+                protocol='all',
+                is_stateless=False,
+                description='OCI Provisioner auto-open all traffic'
+            )
+        ]
+
+        update = oci.core.models.UpdateSecurityListDetails(
+            ingress_security_rules=new_rules
+        )
+        network_client.update_security_list(
+            security_list_id=sec_list_ids[0],
+            update_security_list_details=update
+        )
+
+        return jsonify({
+            'success': True,
+            'method': 'SecurityList',
+            'sec_list_id': sec_list_ids[0],
+            'message': 'Added 0.0.0.0/0 all-traffic ingress rule'
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def check_free_tier_limits(config, account_config, compute_client, block_client, identity_client):
     tenancy = config['tenancy']
     requested_shape = account_config.get('shape')
@@ -604,6 +689,55 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         if boot_gb < 50:
             add_log("Boot volume raised to minimum 50 GB.")
             boot_gb = 50
+
+        # Auto-open firewall if requested
+        open_firewall_flag = account_config.get('open_firewall', False)
+        if open_firewall_flag:
+            try:
+                add_log("Opening firewall: adding 0.0.0.0/0 all-traffic rule...")
+                nsg_id = None
+                # Try to get NSG or sec list from subnet
+                sn = network_client.get_subnet(subnet_id=subnet_id).data
+                nsg_ids = getattr(sn, 'network_security_group_ids', [])
+                sec_ids = getattr(sn, 'security_list_ids', [])
+
+                if nsg_ids:
+                    rule = oci.core.models.AddNetworkSecurityGroupSecurityRulesDetails(
+                        security_rules=[
+                            oci.core.models.AddSecurityRuleDetails(
+                                direction='INGRESS', protocol='all',
+                                source='0.0.0.0/0',
+                                description='OCI Provisioner auto-open'
+                            )
+                        ]
+                    )
+                    network_client.add_network_security_group_security_rules(
+                        network_security_group_id=nsg_ids[0],
+                        add_network_security_group_security_rules_details=rule
+                    )
+                    add_log("Firewall opened via NSG: 0.0.0.0/0 all-traffic allowed")
+                elif sec_ids:
+                    sec_list = network_client.get_security_list(security_list_id=sec_ids[0]).data
+                    existing = getattr(sec_list, 'ingress_security_rules', [])
+                    already = any(getattr(r, 'source', '') == '0.0.0.0/0' and getattr(r, 'protocol', '') == 'all' for r in existing)
+                    if not already:
+                        new_rules = existing + [oci.core.models.IngressSecurityRule(
+                            source='0.0.0.0/0', protocol='all', is_stateless=False,
+                            description='OCI Provisioner auto-open'
+                        )]
+                        network_client.update_security_list(
+                            security_list_id=sec_ids[0],
+                            update_security_list_details=oci.core.models.UpdateSecurityListDetails(
+                                ingress_security_rules=new_rules
+                            )
+                        )
+                        add_log("Firewall opened via Security List: 0.0.0.0/0 all-traffic allowed")
+                    else:
+                        add_log("Firewall already open: 0.0.0.0/0 rule exists")
+                else:
+                    add_log("Warning: Could not find NSG or Security List to open firewall", 'warn')
+            except Exception as e:
+                add_log(f"Warning: Failed to open firewall: {str(e)[:80]}", 'warn')
 
         add_log(f"Setup Verified -> Subnet: {subnet_id[:20]}... | "
                 f"Image: {image_id[:20]}... | Zone: {ad_list[0] if ad_list else 'N/A'}")

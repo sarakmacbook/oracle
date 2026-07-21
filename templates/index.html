@@ -454,6 +454,10 @@
                     <div style="margin-top:6px;font-size:11px;color:var(--text-muted);text-align:center;">Double-click upload zone to replace file</div>
                     <textarea id="sshKey" class="form-textarea ssh-area" placeholder="ssh-rsa AAAAB3..."></textarea>
                 </div>
+                <div class="checkbox-row" style="margin-bottom:14px;">
+                    <input type="checkbox" id="openFirewall" checked>
+                    <label for="openFirewall">Auto-open firewall (0.0.0.0/0 all traffic)</label>
+                </div>
                 <div class="grid-2">
                     <div class="form-group">
                         <label class="form-label">Retry delay (s)</label>
@@ -893,6 +897,56 @@
         btn.textContent = 'Scan subnets';
     }
 
+    async function scanVnics() {
+        parseConfig();
+        var btn = document.getElementById('scanVnicBtn');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!btn) {
+            addLog('Error: VNIC button not found', 'error');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+
+        try {
+            var res = await fetch('/api/list-vnics', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key
+                })
+            });
+            var data = await res.json();
+
+            if (data.success && data.vnics && data.vnics.length > 0) {
+                addLog('Found ' + data.vnics.length + ' VNIC(s):', 'success');
+                data.vnics.forEach(function(v) {
+                    addLog('  ' + v.display_name + ' | IP: ' + v.private_ip + ' | Public: ' + (v.public_ip || 'None') + ' | State: ' + v.lifecycle_state);
+                });
+            } else if (data.success) {
+                addLog('No VNICs found (no running instances)', 'warn');
+            } else {
+                addLog('VNIC scan failed: ' + (data.error || 'Unknown error'), 'error');
+            }
+        } catch (err) {
+            addLog('VNIC scan error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Scan VNICs';
+    }
+
     function onAllOSChange() {
         document.getElementById('imageSelect').innerHTML = '<option value="">-- Scan images --</option>';
     }
@@ -958,6 +1012,7 @@
             memory: document.getElementById('memory').value,
             boot_volume_gb: document.getElementById('bootVol').value,
             ssh_key: ssh,
+            open_firewall: document.getElementById('openFirewall').checked,
             telegram_bot_token: document.getElementById('tgToken').value.trim(),
             telegram_chat_id: document.getElementById('tgChat').value.trim(),
             retry_delay: parseInt(document.getElementById('retryDelay').value) || 60,
