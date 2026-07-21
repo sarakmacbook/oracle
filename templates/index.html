@@ -466,6 +466,14 @@
                             <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Source CIDR</label>
                             <input type="text" id="firewallCidr" class="form-input" value="0.0.0.0/0" placeholder="e.g. 0.0.0.0/0" style="font-size:12px;">
                         </div>
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Direction</label>
+                            <select id="firewallDirection" class="form-select" style="font-size:12px;">
+                                <option value="ingress">Ingress (inbound)</option>
+                                <option value="egress">Egress (outbound)</option>
+                                <option value="both">Both</option>
+                            </select>
+                        </div>
                     </div>
 
                     <div style="display:flex;gap:8px;">
@@ -970,8 +978,9 @@
         var user = document.getElementById('cfgUser').value;
         var key = document.getElementById('cfgKey').value;
         var subnetId = document.getElementById('subnetSelect').value;
-        var ports = document.getElementById('firewallPorts').value.trim();
-        var cidr = document.getElementById('firewallCidr').value.trim();
+        var ports = document.getElementById('firewallPorts').value.trim() || 'all';
+        var cidr = document.getElementById('firewallCidr').value.trim() || '0.0.0.0/0';
+        var direction = document.getElementById('firewallDirection').value;
 
         if (!user || !key) {
             addLog('Error: Credentials required first', 'error');
@@ -981,6 +990,16 @@
             addLog('Error: Select a subnet first (scan subnets)', 'error');
             result.style.display = 'block';
             result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+
+        // Confirmation prompt
+        var dirLabel = direction === 'ingress' ? 'INBOUND' : direction === 'egress' ? 'OUTBOUND' : 'INBOUND + OUTBOUND';
+        var confirmMsg = 'Really?\n\nOpen ' + ports + ' ' + dirLabel + ' from ' + cidr + ' to the public internet?';
+        if (!confirm(confirmMsg)) {
+            addLog('Firewall action cancelled by user', 'warn');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Action cancelled</span>';
             return;
         }
 
@@ -1000,7 +1019,8 @@
                     private_key: key,
                     subnet_id: subnetId,
                     ports: ports,
-                    cidr: cidr
+                    cidr: cidr,
+                    direction: direction
                 })
             });
             var data = await res.json();
@@ -1011,8 +1031,8 @@
                     result.innerHTML = '<span style="color:var(--positive)">Rule(s) already exist for ' + data.ports + ' from ' + data.cidr + '</span>';
                     addLog('Firewall rules already exist', 'success');
                 } else {
-                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
-                    addLog('Opened port(s) ' + data.ports + ' from ' + data.cidr + ' via ' + data.method, 'success');
+                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
+                    addLog('Opened port(s) ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method, 'success');
                 }
             } else {
                 result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
