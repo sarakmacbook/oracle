@@ -454,9 +454,25 @@
                     <div style="margin-top:6px;font-size:11px;color:var(--text-muted);text-align:center;">Double-click upload zone to replace file</div>
                     <textarea id="sshKey" class="form-textarea ssh-area" placeholder="ssh-rsa AAAAB3..."></textarea>
                 </div>
-                <div class="checkbox-row" style="margin-bottom:14px;">
-                    <input type="checkbox" id="openFirewall" checked>
-                    <label for="openFirewall">Auto-open firewall (0.0.0.0/0 all traffic)</label>
+                <div class="form-group" style="background:var(--surface-raised);padding:12px;border-radius:var(--radius-md);border:1px solid var(--border);">
+                    <label class="form-label" style="color:var(--text-secondary);">Firewall / Security Rules</label>
+
+                    <div style="display:flex;gap:8px;margin-bottom:10px;">
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Port(s) to open</label>
+                            <input type="text" id="firewallPorts" class="form-input" value="all" placeholder="e.g. 22,80,443 or all" style="font-size:12px;">
+                        </div>
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Source CIDR</label>
+                            <input type="text" id="firewallCidr" class="form-input" value="0.0.0.0/0" placeholder="e.g. 0.0.0.0/0" style="font-size:12px;">
+                        </div>
+                    </div>
+
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn" id="scanRulesBtn" onclick="scanSecurityRules()" style="flex:1;padding:8px 12px;font-size:12px;">Scan existing rules</button>
+                        <button class="btn" id="openFirewallBtn" onclick="openFirewallNow()" style="flex:1;padding:8px 12px;font-size:12px;">Open port(s) now</button>
+                    </div>
+                    <div id="firewallResult" style="margin-top:8px;font-size:11px;display:none;"></div>
                 </div>
                 <div class="grid-2">
                     <div class="form-group">
@@ -947,6 +963,137 @@
         btn.textContent = 'Scan VNICs';
     }
 
+    async function openFirewallNow() {
+        parseConfig();
+        var btn = document.getElementById('openFirewallBtn');
+        var result = document.getElementById('firewallResult');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+        var ports = document.getElementById('firewallPorts').value.trim();
+        var cidr = document.getElementById('firewallCidr').value.trim();
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!subnetId) {
+            addLog('Error: Select a subnet first (scan subnets)', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Opening...';
+        result.style.display = 'none';
+
+        try {
+            var res = await fetch('/api/open-firewall', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key,
+                    subnet_id: subnetId,
+                    ports: ports,
+                    cidr: cidr
+                })
+            });
+            var data = await res.json();
+
+            result.style.display = 'block';
+            if (data.success) {
+                if (data.already_open) {
+                    result.innerHTML = '<span style="color:var(--positive)">Rule(s) already exist for ' + data.ports + ' from ' + data.cidr + '</span>';
+                    addLog('Firewall rules already exist', 'success');
+                } else {
+                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
+                    addLog('Opened port(s) ' + data.ports + ' from ' + data.cidr + ' via ' + data.method, 'success');
+                }
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('Firewall open failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('Firewall request error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Open port(s) now';
+    }
+
+    async function scanSecurityRules() {
+        parseConfig();
+        var btn = document.getElementById('scanRulesBtn');
+        var result = document.getElementById('firewallResult');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!subnetId) {
+            addLog('Error: Select a subnet first (scan subnets)', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+        result.style.display = 'none';
+
+        try {
+            var res = await fetch('/api/scan-security-rules', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key,
+                    subnet_id: subnetId
+                })
+            });
+            var data = await res.json();
+
+            result.style.display = 'block';
+            if (data.success) {
+                if (data.rules.length === 0) {
+                    result.innerHTML = '<span style="color:var(--warning)">No ingress rules found. Your subnet is completely closed.</span>';
+                    addLog('No security rules found — subnet is locked down', 'warn');
+                } else {
+                    var html = '<div style="color:var(--text-secondary);margin-bottom:4px;">Found ' + data.rules.length + ' rule(s):</div>';
+                    data.rules.forEach(function(r) {
+                        var port = r.port_range ? 'port ' + r.port_range : 'all ports';
+                        html += '<div style="color:var(--text-muted);padding:2px 0;">• ' + r.type + ' | ' + r.direction + ' | ' + r.protocol + ' | ' + r.source + ' | ' + port + '</div>';
+                    });
+                    result.innerHTML = html;
+                    addLog('Scanned ' + data.rules.length + ' security rule(s)', 'success');
+                }
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('Security rule scan failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('Security rule scan error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Scan existing rules';
+    }
+
     function onAllOSChange() {
         document.getElementById('imageSelect').innerHTML = '<option value="">-- Scan images --</option>';
     }
@@ -1012,7 +1159,6 @@
             memory: document.getElementById('memory').value,
             boot_volume_gb: document.getElementById('bootVol').value,
             ssh_key: ssh,
-            open_firewall: document.getElementById('openFirewall').checked,
             telegram_bot_token: document.getElementById('tgToken').value.trim(),
             telegram_chat_id: document.getElementById('tgChat').value.trim(),
             retry_delay: parseInt(document.getElementById('retryDelay').value) || 60,
