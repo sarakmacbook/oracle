@@ -297,6 +297,42 @@ def test_launch():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/list-vnics', methods=['POST'])
+@require_auth
+def list_vnics():
+    """List VNICs (network interfaces) for debugging network setup."""
+    data = request.json or {}
+    config = build_config(data)
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+        tenancy = config['tenancy']
+
+        # List all VNICs in the tenancy
+        vnics = []
+        vnic_attachments = network_client.list_vnic_attachments(compartment_id=tenancy).data
+        for att in vnic_attachments:
+            try:
+                vnic = network_client.get_vnic(vnic_id=att.vnic_id).data
+                vnics.append({
+                    'id': vnic.id,
+                    'display_name': vnic.display_name or 'Unnamed',
+                    'private_ip': vnic.private_ip,
+                    'public_ip': vnic.public_ip or 'None',
+                    'subnet_id': vnic.subnet_id,
+                    'lifecycle_state': vnic.lifecycle_state,
+                    'is_primary': getattr(att, 'is_primary', False)
+                })
+            except Exception:
+                pass
+
+        return jsonify({'success': True, 'vnics': vnics})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def check_free_tier_limits(config, account_config, compute_client, block_client, identity_client):
     tenancy = config['tenancy']
     requested_shape = account_config.get('shape')
@@ -519,7 +555,18 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         ads = identity_client.list_availability_domains(
             compartment_id=config['tenancy']
         ).data
-        ad_name = ads[0].name if ads else ''
+        ad_list = [ad.name for ad in ads] if ads else []
+        add_log(f"Availability domains found: {len(ad_list)} — {', '.join(ad_list)}")
+
+        # Handle AD preference from user
+        ad_preference = account_config.get('ad_preference', '')
+        if ad_preference and ad_preference in ad_list:
+            # Move preferred AD to front of list
+            ad_list.remove(ad_preference)
+            ad_list.insert(0, ad_preference)
+            add_log(f"Using preferred AD: {ad_preference}")
+        elif ad_preference:
+            add_log(f"Preferred AD '{ad_preference}' not found, using auto-rotation")
 
         subnet_id = account_config.get('subnet_id')
         if not subnet_id:
@@ -597,6 +644,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
 
         attempts = 0
         success = False
+        ad_index = 0
 
         while True:
             attempts += 1
@@ -604,6 +652,14 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             if stop_event.is_set():
                 add_log("Provisioning loop stopped by user.")
                 break
+
+            # Rotate through availability domains
+            current_ad = ad_list[ad_index % len(ad_list)] if ad_list else ''
+            if len(ad_list) > 1:
+                add_log(f"Attempt {attempts}: trying AD '{current_ad}'...")
+
+            # Update instance details with current AD
+            instance_details.availability_domain = current_ad
 
             try:
                 add_log(f"Attempt {attempts}: sending instance launch request...")
@@ -640,16 +696,28 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 add_log(f"Debug -> ServiceError code={code}, status={status}, msg={e.message[:120]}")
                 if "Out of capacity" in msg or status in (500, 429, 503, 504):
                     user_info = f" [user: {oci_username}]" if oci_username else ""
-                    add_log(f"Capacity busy in '{target_region}'.{user_info} Retrying...")
+                    add_log(f"Capacity busy in '{target_region}' AD '{current_ad}'.{user_info} Retrying...")
+                    if len(ad_list) > 1:
+                        ad_index += 1
+                        next_ad = ad_list[ad_index % len(ad_list)]
+                        add_log(f"Switching to next AD: '{next_ad}'")
                 elif "NotAuthorizedOrNotFound" in msg or "Authorization failed" in msg or status == 404:
                     add_log(f"Auth/NotFound error — possible causes:")
-                    add_log(f"  1. Image {image_id[:25]}... not found in AD {ad_name}")
+                    add_log(f"  1. Image {image_id[:25]}... not found in AD {current_ad}")
                     add_log(f"  2. Shape {account_config['shape']} not available in this AD")
                     add_log(f"  3. Subnet {subnet_id[:25]}... missing permissions")
                     add_log(f"  4. Check OCI Console > Instances > Create — test manually")
+                    if len(ad_list) > 1:
+                        ad_index += 1
+                        add_log(f"Trying next AD...")
+                        continue
                     break
                 else:
                     add_log(f"OCI API error: {e.message}")
+                    if len(ad_list) > 1:
+                        ad_index += 1
+                        add_log(f"Trying next AD...")
+                        continue
                     break
             except (ConnectionError, OSError) as e:
                 user_info = f" [user: {oci_username}]" if oci_username else ""

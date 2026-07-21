@@ -370,6 +370,10 @@
                     <button class="btn" id="quotaBtn" onclick="checkQuota()">Check free tier</button>
                     <button class="btn" id="scanBtn" onclick="scanImages()">Scan OS images</button>
                 </div>
+                <div class="btn-row">
+                    <button class="btn" id="scanSubnetBtn" onclick="scanSubnets()">Scan subnets</button>
+                    <button class="btn" id="scanVnicBtn" onclick="scanVnics()">Scan VNICs</button>
+                </div>
                 <div id="quotaPanel" class="quota-panel"></div>
                 <div class="checkbox-row">
                     <input type="checkbox" id="allOS" onchange="onAllOSChange()">
@@ -384,12 +388,19 @@
                 <div class="form-group">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
                         <label class="form-label" style="margin-bottom:0;">Target subnet</label>
-                        <button class="btn" id="scanSubnetBtn" onclick="scanSubnets()" style="padding:3px 10px;font-size:11px;flex:none;">Scan subnets</button>
+                        <button class="btn" id="scanSubnetBtn2" onclick="scanSubnets()" style="padding:3px 10px;font-size:11px;flex:none;">Scan subnets</button>
                     </div>
                     <select id="subnetSelect" class="form-select">
                         <option value="">-- Auto-select first available --</option>
                     </select>
                     <div id="subnetInfo" style="margin-top:6px;font-size:11px;color:var(--text-muted);display:none;"></div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Availability domain preference</label>
+                    <select id="adSelect" class="form-select">
+                        <option value="">-- Auto-rotate through all ADs --</option>
+                    </select>
+                    <div id="adInfo" style="margin-top:6px;font-size:11px;color:var(--text-muted);display:none;"></div>
                 </div>
             </div>
         </div>
@@ -941,6 +952,7 @@
             shape: document.getElementById('shapeSelect').value,
             image_id: image,
             subnet_id: document.getElementById('subnetSelect').value,
+            ad_preference: document.getElementById('adSelect').value,
             display_name: document.getElementById('vmName').value,
             ocpus: document.getElementById('ocpus').value,
             memory: document.getElementById('memory').value,
