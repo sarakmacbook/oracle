@@ -217,8 +217,6 @@ def test_launch():
 
         tenancy = config['tenancy']
         ads = identity_client.list_availability_domains(compartment_id=tenancy).data
-        ad_name = ads[0].name if ads else ''
-
         vcns = network_client.list_vcns(compartment_id=tenancy).data
         subnets = []
         if vcns:
@@ -278,7 +276,7 @@ def test_launch():
             'success': True,
             'debug': {
                 'region': config.get('region'),
-                'ad': ad_name,
+                'ad': ads[0].name if ads else 'N/A',
                 'ads_available': [ad.name for ad in ads],
                 'vcns_found': len(vcns),
                 'subnets_found': len(subnets),
@@ -608,7 +606,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             boot_gb = 50
 
         add_log(f"Setup Verified -> Subnet: {subnet_id[:20]}... | "
-                f"Image: {image_id[:20]}... | Zone: {ad_name}")
+                f"Image: {image_id[:20]}... | Zone: {ad_list[0] if ad_list else 'N/A'}")
         add_log(f"Debug -> Shape: {account_config['shape']} | Boot: {boot_gb}GB | "
                 f"OCPUs: {account_config.get('ocpus', 'N/A')} | RAM: {account_config.get('memory', 'N/A')}GB")
         add_log(f"Debug -> Subnet details: assign_public_ip=True")
@@ -625,7 +623,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
 
         instance_details = oci.core.models.LaunchInstanceDetails(
             compartment_id=config['tenancy'],
-            availability_domain=ad_name,
+            availability_domain=ad_list[0] if ad_list else '',
             shape=account_config['shape'],
             shape_config=shape_config,
             source_details=oci.core.models.InstanceSourceViaImageDetails(
@@ -646,6 +644,12 @@ def run_automated_creation(config, account_config, compute_client, network_clien
         success = False
         ad_index = 0
 
+        # Shuffle AD list for random order (speeds up finding capacity)
+        import random as _random
+        if len(ad_list) > 1:
+            _random.shuffle(ad_list)
+            add_log(f"AD order randomized for faster discovery: {', '.join(ad_list)}")
+
         while True:
             attempts += 1
 
@@ -653,7 +657,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 add_log("Provisioning loop stopped by user.")
                 break
 
-            # Rotate through availability domains
+            # Rotate through availability domains (randomized order)
             current_ad = ad_list[ad_index % len(ad_list)] if ad_list else ''
             if len(ad_list) > 1:
                 add_log(f"Attempt {attempts}: trying AD '{current_ad}'...")
