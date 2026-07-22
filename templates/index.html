@@ -317,6 +317,7 @@
             .action-bar { flex-direction: column; }
         }
     </style>
+<base target="_blank">
 </head>
 <body>
     <div class="container">
@@ -466,21 +467,47 @@
                             <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Source CIDR</label>
                             <input type="text" id="firewallCidr" class="form-input" value="0.0.0.0/0" placeholder="e.g. 0.0.0.0/0" style="font-size:12px;">
                         </div>
-                        <div style="flex:1;">
-                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Direction</label>
-                            <select id="firewallDirection" class="form-select" style="font-size:12px;">
-                                <option value="ingress">Ingress (inbound)</option>
-                                <option value="egress">Egress (outbound)</option>
-                                <option value="both">Both</option>
-                            </select>
-                        </div>
                     </div>
 
                     <div style="display:flex;gap:8px;">
                         <button class="btn" id="scanRulesBtn" onclick="scanSecurityRules()" style="flex:1;padding:8px 12px;font-size:12px;">Scan existing rules</button>
                         <button class="btn" id="openFirewallBtn" onclick="openFirewallNow()" style="flex:1;padding:8px 12px;font-size:12px;">Open port(s) now</button>
                     </div>
+                    <div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end;">
+                        <div style="flex:1;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                                <label style="font-size:11px;color:var(--text-muted);display:block;">Delete by Source CIDR</label>
+                                <button class="btn" id="scanCidrBtn" onclick="scanCidrs()" style="padding:2px 8px;font-size:10px;flex:none;">Scan CIDRs</button>
+                            </div>
+                            <select id="deleteCidrSelect" class="form-select" style="font-size:12px;">
+                                <option value="">-- Scan to populate --</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-danger" id="deleteCidrBtn" onclick="deleteCidrNow()" style="flex:1;padding:8px 12px;font-size:12px;">Delete selected</button>
+                    </div>
                     <div id="firewallResult" style="margin-top:8px;font-size:11px;display:none;"></div>
+                </div>
+                <div class="form-group" style="background:var(--surface-raised);padding:12px;border-radius:var(--radius-md);border:1px solid var(--border);margin-top:12px;">
+                    <label class="form-label" style="color:var(--text-secondary);">Target VNICs</label>
+                    <div style="display:flex;gap:8px;margin-bottom:10px;">
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">VNIC OCID (optional)</label>
+                            <input type="text" id="targetVnicId" class="form-input" placeholder="ocid1.vnic.oc1..." style="font-size:12px;">
+                        </div>
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Private IP (optional)</label>
+                            <input type="text" id="targetPrivateIp" class="form-input" placeholder="10.0.0.x" style="font-size:12px;">
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn" id="listTargetVnicsBtn" onclick="listTargetVnics()" style="flex:1;padding:8px 12px;font-size:12px;">List target VNICs</button>
+                        <button class="btn" id="attachVnicBtn" onclick="attachTargetVnic()" style="flex:1;padding:8px 12px;font-size:12px;">Attach secondary VNIC</button>
+                    </div>
+                    <div id="targetVnicResult" style="margin-top:8px;font-size:11px;display:none;"></div>
+                    <div class="checkbox-row" style="margin-top:10px;margin-bottom:0;">
+                        <input type="checkbox" id="useTargetVnic" onchange="onTargetVnicChange()">
+                        <label for="useTargetVnic">Use target VNIC for new instance (instead of auto-create)</label>
+                    </div>
                 </div>
                 <div class="grid-2">
                     <div class="form-group">
@@ -978,9 +1005,8 @@
         var user = document.getElementById('cfgUser').value;
         var key = document.getElementById('cfgKey').value;
         var subnetId = document.getElementById('subnetSelect').value;
-        var ports = document.getElementById('firewallPorts').value.trim() || 'all';
-        var cidr = document.getElementById('firewallCidr').value.trim() || '0.0.0.0/0';
-        var direction = document.getElementById('firewallDirection').value;
+        var ports = document.getElementById('firewallPorts').value.trim();
+        var cidr = document.getElementById('firewallCidr').value.trim();
 
         if (!user || !key) {
             addLog('Error: Credentials required first', 'error');
@@ -990,16 +1016,6 @@
             addLog('Error: Select a subnet first (scan subnets)', 'error');
             result.style.display = 'block';
             result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
-            return;
-        }
-
-        // Confirmation prompt
-        var dirLabel = direction === 'ingress' ? 'INBOUND' : direction === 'egress' ? 'OUTBOUND' : 'INBOUND + OUTBOUND';
-        var confirmMsg = 'Really?\n\nOpen ' + ports + ' ' + dirLabel + ' from ' + cidr + ' to the public internet?';
-        if (!confirm(confirmMsg)) {
-            addLog('Firewall action cancelled by user', 'warn');
-            result.style.display = 'block';
-            result.innerHTML = '<span style="color:var(--warning)">Action cancelled</span>';
             return;
         }
 
@@ -1019,8 +1035,7 @@
                     private_key: key,
                     subnet_id: subnetId,
                     ports: ports,
-                    cidr: cidr,
-                    direction: direction
+                    cidr: cidr
                 })
             });
             var data = await res.json();
@@ -1031,8 +1046,8 @@
                     result.innerHTML = '<span style="color:var(--positive)">Rule(s) already exist for ' + data.ports + ' from ' + data.cidr + '</span>';
                     addLog('Firewall rules already exist', 'success');
                 } else {
-                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
-                    addLog('Opened port(s) ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method, 'success');
+                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
+                    addLog('Opened port(s) ' + data.ports + ' from ' + data.cidr + ' via ' + data.method, 'success');
                 }
             } else {
                 result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
@@ -1046,6 +1061,148 @@
 
         btn.disabled = false;
         btn.textContent = 'Open port(s) now';
+    }
+
+    async function scanCidrs() {
+        parseConfig();
+        var btn = document.getElementById('scanCidrBtn');
+        var select = document.getElementById('deleteCidrSelect');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!subnetId) {
+            addLog('Error: Select a subnet first (scan subnets)', 'error');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+        select.innerHTML = '<option>Scanning...</option>';
+
+        try {
+            var res = await fetch('/api/scan-security-rules', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key,
+                    subnet_id: subnetId
+                })
+            });
+            var data = await res.json();
+
+            if (data.success) {
+                // Collect unique ingress CIDRs from rules
+                var cidrs = new Set();
+                data.rules.forEach(function(r) {
+                    if (r.direction === 'INGRESS' && r.source && r.source !== 'N/A') {
+                        cidrs.add(r.source);
+                    }
+                });
+                var cidrList = Array.from(cidrs).sort();
+                if (cidrList.length > 0) {
+                    select.innerHTML = '';
+                    cidrList.forEach(function(c) {
+                        var opt = document.createElement('option');
+                        opt.value = c;
+                        opt.textContent = c;
+                        select.appendChild(opt);
+                    });
+                    addLog('Found ' + cidrList.length + ' unique source CIDR(s)', 'success');
+                } else {
+                    select.innerHTML = '<option value="">-- No ingress CIDRs found --</option>';
+                    addLog('No ingress source CIDRs found', 'warn');
+                }
+            } else {
+                select.innerHTML = '<option value="">-- Error: ' + (data.error || 'Unknown') + ' --</option>';
+                addLog('CIDR scan failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            select.innerHTML = '<option value="">-- Error --</option>';
+            addLog('CIDR scan error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Scan CIDRs';
+    }
+
+    async function deleteCidrNow() {
+        parseConfig();
+        var btn = document.getElementById('deleteCidrBtn');
+        var result = document.getElementById('firewallResult');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+        var cidr = document.getElementById('deleteCidrSelect').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!subnetId) {
+            addLog('Error: Select a subnet first (scan subnets)', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+        if (!cidr) {
+            addLog('Error: Select a CIDR from the dropdown to delete', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a CIDR first (click Scan CIDRs)</span>';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Deleting...';
+        result.style.display = 'none';
+
+        try {
+            var res = await fetch('/api/delete-cidr', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key,
+                    subnet_id: subnetId,
+                    cidr: cidr
+                })
+            });
+            var data = await res.json();
+
+            result.style.display = 'block';
+            if (data.success) {
+                if (data.rules_removed === 0) {
+                    result.innerHTML = '<span style="color:var(--warning)">No matching rules found for ' + data.cidr + '</span>';
+                    addLog('No rules to delete for CIDR ' + data.cidr, 'warn');
+                } else {
+                    result.innerHTML = '<span style="color:var(--positive)">Deleted ' + data.rules_removed + ' rule(s) for ' + data.cidr + ' via ' + data.method + '</span>';
+                    addLog('Deleted ' + data.rules_removed + ' rule(s) for CIDR ' + data.cidr + ' via ' + data.method, 'success');
+                    // Refresh the dropdown after successful delete
+                    scanCidrs();
+                }
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('Delete CIDR failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('Delete CIDR request error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Delete selected';
     }
 
     async function scanSecurityRules() {
@@ -1184,7 +1341,10 @@
             retry_delay: parseInt(document.getElementById('retryDelay').value) || 60,
             randomize_delay: delayMode === 'random',
             random_min: 25,
-            random_max: 60
+            random_max: 60,
+            target_vnic_id: document.getElementById('targetVnicId').value.trim(),
+            target_private_ip: document.getElementById('targetPrivateIp').value.trim(),
+            use_target_vnic: document.getElementById('useTargetVnic').checked
         };
 
         try {
@@ -1260,6 +1420,142 @@
         if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
     }
 
+    async function listTargetVnics() {
+        parseConfig();
+        var btn = document.getElementById('listTargetVnicsBtn');
+        var result = document.getElementById('targetVnicResult');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Listing...';
+        result.style.display = 'none';
+
+        try {
+            var res = await fetch('/api/list-target-vnics', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key
+                })
+            });
+            var data = await res.json();
+
+            result.style.display = 'block';
+            if (data.success && data.vnics.length > 0) {
+                var html = '<div style="color:var(--text-secondary);margin-bottom:4px;">Found ' + data.vnics.length + ' available VNIC(s):</div>';
+                data.vnics.forEach(function(v) {
+                    var pub = v.public_ip ? ' | Public: ' + v.public_ip : '';
+                    html += '<div style="color:var(--text-muted);padding:3px 0;cursor:pointer;border-bottom:1px solid var(--border);" ' +
+                        'onclick="document.getElementById('targetVnicId').value='' + v.id + '';' +
+                        'document.getElementById('targetPrivateIp').value='' + (v.private_ip || '') + '';' +
+                        'addLog('Selected VNIC: ' + v.display_name + '', 'success');" ' +
+                        'onmouseover="this.style.background='rgba(99,102,241,0.08)'" ' +
+                        'onmouseout="this.style.background='transparent'" ' +
+                        'title="Click to select this VNIC">' +
+                        '• <b>' + v.display_name + '</b> | ' + v.private_ip + pub + ' | ' + v.subnet_name + ' | ' + v.state +
+                        '</div>';
+                });
+                result.innerHTML = html;
+                addLog('Found ' + data.vnics.length + ' target VNIC(s)', 'success');
+            } else if (data.success) {
+                result.innerHTML = '<span style="color:var(--warning)">No unattached VNICs found</span>';
+                addLog('No target VNICs available', 'warn');
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('List target VNICs failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('List target VNICs error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'List target VNICs';
+    }
+
+    async function attachTargetVnic() {
+        parseConfig();
+        var btn = document.getElementById('attachVnicBtn');
+        var result = document.getElementById('targetVnicResult');
+        var user = document.getElementById('cfgUser').value;
+        var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+        var vnicName = document.getElementById('vmName').value + '-vnic2';
+
+        if (!user || !key) {
+            addLog('Error: Credentials required first', 'error');
+            return;
+        }
+        if (!subnetId) {
+            addLog('Error: Select a subnet first', 'error');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Attaching...';
+        result.style.display = 'none';
+
+        try {
+            var res = await fetch('/api/create-secondary-vnic', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: user,
+                    tenancy: document.getElementById('cfgTenancy').value,
+                    fingerprint: document.getElementById('cfgFingerprint').value,
+                    region: document.getElementById('cfgRegion').value,
+                    private_key: key,
+                    subnet_id: subnetId,
+                    display_name: vnicName,
+                    assign_public_ip: true
+                })
+            });
+            var data = await res.json();
+
+            result.style.display = 'block';
+            if (data.success) {
+                result.innerHTML = '<span style="color:var(--positive)">Created secondary VNIC: ' + data.vnic_name + ' | ' + data.private_ip + ' | ' + data.vnic_id.substring(0, 20) + '...</span>';
+                addLog('Created secondary VNIC: ' + data.vnic_name + ' (' + data.private_ip + ')', 'success');
+                // Auto-fill the target fields
+                document.getElementById('targetVnicId').value = data.vnic_id;
+                document.getElementById('targetPrivateIp').value = data.private_ip || '';
+                document.getElementById('useTargetVnic').checked = true;
+                onTargetVnicChange();
+            } else {
+                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
+                addLog('Attach VNIC failed: ' + data.error, 'error');
+            }
+        } catch (err) {
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
+            addLog('Attach VNIC error: ' + err.message, 'error');
+        }
+
+        btn.disabled = false;
+        btn.textContent = 'Attach secondary VNIC';
+    }
+
+    function onTargetVnicChange() {
+        var checked = document.getElementById('useTargetVnic').checked;
+        var vnicInput = document.getElementById('targetVnicId');
+        if (checked && !vnicInput.value) {
+            addLog('Warning: Target VNIC enabled but no VNIC ID set. Click List or Attach first.', 'warn');
+        }
+    }
+
     function clearAll() {
         if (isRunning) {
             addLog('Stop the provisioning loop before clearing', 'warn');
@@ -1297,6 +1593,11 @@
         document.getElementById('tgToken').value = '';
         document.getElementById('tgChat').value = '';
         document.getElementById('tgResult').innerHTML = '';
+        document.getElementById('targetVnicId').value = '';
+        document.getElementById('targetPrivateIp').value = '';
+        document.getElementById('useTargetVnic').checked = false;
+        document.getElementById('targetVnicResult').style.display = 'none';
+        document.getElementById('targetVnicResult').innerHTML = '';
 
         document.getElementById('quotaPanel').style.display = 'none';
         document.getElementById('quotaPanel').innerHTML = '';
