@@ -516,6 +516,87 @@ def scan_security_rules():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/api/delete-cidr', methods=['POST'])
+@require_auth
+def delete_cidr():
+    """Delete ingress rules matching a specific source CIDR from NSG or Security List."""
+    data = request.json or {}
+    config = build_config(data)
+    subnet_id = data.get('subnet_id')
+    cidr = data.get('cidr', '').strip()
+
+    if not subnet_id:
+        return jsonify({'success': False, 'error': 'subnet_id required'})
+    if not cidr:
+        return jsonify({'success': False, 'error': 'cidr required'})
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+
+        subnet = network_client.get_subnet(subnet_id=subnet_id).data
+        rules_removed = 0
+        method = None
+
+        # Try NSG first (modern approach)
+        nsg_ids = getattr(subnet, 'network_security_group_ids', [])
+        if nsg_ids and len(nsg_ids) > 0:
+            nsg_id = nsg_ids[0]
+            nsg_rules = network_client.list_network_security_group_security_rules(
+                network_security_group_id=nsg_id
+            ).data
+
+            to_delete = []
+            for r in nsg_rules:
+                rule_cidr = getattr(r, 'source', '')
+                if rule_cidr == cidr:
+                    to_delete.append(r.id)
+
+            if to_delete:
+                network_client.remove_network_security_group_security_rules(
+                    network_security_group_id=nsg_id,
+                    remove_network_security_group_security_rules_details=oci.core.models.RemoveNetworkSecurityGroupSecurityRulesDetails(
+                        security_rule_ids=to_delete
+                    )
+                )
+                rules_removed = len(to_delete)
+                method = 'NSG'
+
+        # Fallback to Security List (legacy approach)
+        if rules_removed == 0:
+            sec_list_ids = getattr(subnet, 'security_list_ids', [])
+            if sec_list_ids:
+                sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
+                existing = getattr(sec_list, 'ingress_security_rules', [])
+
+                new_rules = []
+                for r in existing:
+                    rule_cidr = getattr(r, 'source', '')
+                    if rule_cidr == cidr:
+                        rules_removed += 1
+                    else:
+                        new_rules.append(r)
+
+                if rules_removed > 0:
+                    network_client.update_security_list(
+                        security_list_id=sec_list_ids[0],
+                        update_security_list_details=oci.core.models.UpdateSecurityListDetails(
+                            ingress_security_rules=new_rules
+                        )
+                    )
+                    method = 'SecurityList'
+
+        return jsonify({
+            'success': True,
+            'method': method or 'None',
+            'rules_removed': rules_removed,
+            'cidr': cidr
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def check_free_tier_limits(config, account_config, compute_client, block_client, identity_client):
     tenancy = config['tenancy']
     requested_shape = account_config.get('shape')
