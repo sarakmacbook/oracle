@@ -335,12 +335,12 @@ def list_vnics():
 @app.route('/api/open-firewall', methods=['POST'])
 @require_auth
 def open_firewall():
+    """Add ingress rule(s) to subnet's security list or NSG."""
     data = request.json or {}
     config = build_config(data)
     subnet_id = data.get('subnet_id')
-    ports = data.get('ports', 'all')
+    ports = data.get('ports', 'all')  # "all" or "22,80,443"
     cidr = data.get('cidr', '0.0.0.0/0')
-    direction = data.get('direction', 'ingress')
 
     if not subnet_id:
         return jsonify({'success': False, 'error': 'subnet_id required'})
@@ -351,40 +351,31 @@ def open_firewall():
 
         subnet = network_client.get_subnet(subnet_id=subnet_id).data
 
+        # Parse ports
         port_list = []
         if ports == 'all' or ports == '*':
             port_list = ['all']
         else:
             port_list = [p.strip() for p in str(ports).split(',') if p.strip()]
 
-        directions_to_add = []
-        if direction in ('ingress', 'both'):
-            directions_to_add.append('INGRESS')
-        if direction in ('egress', 'both'):
-            directions_to_add.append('EGRESS')
-
+        # Try NSG first (modern approach)
         nsg_ids = getattr(subnet, 'network_security_group_ids', [])
         if nsg_ids and len(nsg_ids) > 0:
             rules = []
-            for dir in directions_to_add:
-                for port in port_list:
-                    if port == 'all':
-                        rules.append(oci.core.models.AddSecurityRuleDetails(
-                            direction=dir, protocol='all',
-                            source=cidr if dir == 'INGRESS' else None,
-                            destination=cidr if dir == 'EGRESS' else None,
-                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
-                        ))
-                    else:
-                        rules.append(oci.core.models.AddSecurityRuleDetails(
-                            direction=dir, protocol='6',
-                            source=cidr if dir == 'INGRESS' else None,
-                            destination=cidr if dir == 'EGRESS' else None,
-                            tcp_options=oci.core.models.TcpOptions(
-                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
-                            ),
-                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
-                        ))
+            for port in port_list:
+                if port == 'all':
+                    rules.append(oci.core.models.AddSecurityRuleDetails(
+                        direction='INGRESS', protocol='all', source=cidr,
+                        description='OCI Provisioner: all traffic'
+                    ))
+                else:
+                    rules.append(oci.core.models.AddSecurityRuleDetails(
+                        direction='INGRESS', protocol='6', source=cidr,  # TCP
+                        tcp_options=oci.core.models.TcpOptions(
+                            destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
+                        ),
+                        description='OCI Provisioner: port ' + port
+                    ))
 
             result = network_client.add_network_security_group_security_rules(
                 network_security_group_id=nsg_ids[0],
@@ -398,68 +389,55 @@ def open_firewall():
                 'nsg_id': nsg_ids[0],
                 'rules_added': len(result.data.security_rules),
                 'ports': ports,
-                'cidr': cidr,
-                'direction': direction
+                'cidr': cidr
             })
 
+        # Fallback to Security List (legacy approach)
         sec_list_ids = getattr(subnet, 'security_list_ids', [])
         if not sec_list_ids:
             return jsonify({'success': False, 'error': 'No security list or NSG found on subnet'})
 
         sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
+        existing = getattr(sec_list, 'ingress_security_rules', [])
 
-        new_ingress = list(getattr(sec_list, 'ingress_security_rules', []))
-        new_egress = list(getattr(sec_list, 'egress_security_rules', []))
+        new_rules = list(existing)
         added = []
 
-        for dir in directions_to_add:
-            existing = new_ingress if dir == 'INGRESS' else new_egress
-            for port in port_list:
-                if port == 'all':
-                    already = any(getattr(r, 'source' if dir == 'INGRESS' else 'destination', '') == cidr and getattr(r, 'protocol', '') == 'all' for r in existing)
-                    if not already:
-                        rule = oci.core.models.IngressSecurityRule(
-                            source=cidr, protocol='all', is_stateless=False,
-                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
-                        ) if dir == 'INGRESS' else oci.core.models.EgressSecurityRule(
-                            destination=cidr, protocol='all', is_stateless=False,
-                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
-                        )
-                        existing.append(rule)
-                        added.append(dir.lower() + ':all')
-                else:
-                    already = any(
-                        getattr(r, 'source' if dir == 'INGRESS' else 'destination', '') == cidr and 
-                        getattr(r, 'protocol', '') == '6' and
-                        getattr(getattr(r, 'tcp_options', None), 'destination_port_range', None) and
-                        getattr(getattr(r, 'tcp_options', None), 'destination_port_range').min == int(port)
-                        for r in existing
-                    )
-                    if not already:
-                        rule = oci.core.models.IngressSecurityRule(
-                            source=cidr, protocol='6', is_stateless=False,
-                            tcp_options=oci.core.models.TcpOptions(
-                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
-                            ),
-                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
-                        ) if dir == 'INGRESS' else oci.core.models.EgressSecurityRule(
-                            destination=cidr, protocol='6', is_stateless=False,
-                            tcp_options=oci.core.models.TcpOptions(
-                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
-                            ),
-                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
-                        )
-                        existing.append(rule)
-                        added.append(dir.lower() + ':' + port)
+        for port in port_list:
+            if port == 'all':
+                # Check if already exists
+                already = any(getattr(r, 'source', '') == cidr and getattr(r, 'protocol', '') == 'all' for r in existing)
+                if not already:
+                    new_rules.append(oci.core.models.IngressSecurityRule(
+                        source=cidr, protocol='all', is_stateless=False,
+                        description='OCI Provisioner: all traffic'
+                    ))
+                    added.append('all')
+            else:
+                already = any(
+                    getattr(r, 'source', '') == cidr and 
+                    getattr(r, 'protocol', '') == '6' and
+                    getattr(getattr(r, 'tcp_options', None), 'destination_port_range', None) and
+                    getattr(getattr(r, 'tcp_options', None), 'destination_port_range').min == int(port)
+                    for r in existing
+                )
+                if not already:
+                    new_rules.append(oci.core.models.IngressSecurityRule(
+                        source=cidr, protocol='6', is_stateless=False,
+                        tcp_options=oci.core.models.TcpOptions(
+                            destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
+                        ),
+                        description='OCI Provisioner: port ' + port
+                    ))
+                    added.append(port)
 
         if not added:
-            return jsonify({'success': True, 'already_open': True, 'message': 'Rule(s) already exist', 'ports': ports, 'cidr': cidr, 'direction': direction})
+            return jsonify({'success': True, 'already_open': True, 'message': 'Rule(s) already exist', 'ports': ports, 'cidr': cidr})
 
         network_client.update_security_list(
             security_list_id=sec_list_ids[0],
             update_security_list_details=oci.core.models.UpdateSecurityListDetails(
-                ingress_security_rules=new_ingress,
-                egress_security_rules=new_egress
+                ingress_security_rules=new_rules
             )
         )
 
@@ -470,8 +448,7 @@ def open_firewall():
             'rules_added': len(added),
             'ports_added': added,
             'ports': ports,
-            'cidr': cidr,
-            'direction': direction
+            'cidr': cidr
         })
 
     except Exception as e:
@@ -534,6 +511,260 @@ def scan_security_rules():
                 })
 
         return jsonify({'success': True, 'rules': rules, 'nsg_count': len(nsg_ids), 'sec_list_count': len(sec_list_ids)})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/delete-cidr', methods=['POST'])
+@require_auth
+def delete_cidr():
+    """Delete ingress rules matching a specific source CIDR from NSG or Security List."""
+    data = request.json or {}
+    config = build_config(data)
+    subnet_id = data.get('subnet_id')
+    cidr = data.get('cidr', '').strip()
+
+    if not subnet_id:
+        return jsonify({'success': False, 'error': 'subnet_id required'})
+    if not cidr:
+        return jsonify({'success': False, 'error': 'cidr required'})
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+
+        subnet = network_client.get_subnet(subnet_id=subnet_id).data
+        rules_removed = 0
+        method = None
+
+        # Try NSG first (modern approach)
+        nsg_ids = getattr(subnet, 'network_security_group_ids', [])
+        if nsg_ids and len(nsg_ids) > 0:
+            nsg_id = nsg_ids[0]
+            nsg_rules = network_client.list_network_security_group_security_rules(
+                network_security_group_id=nsg_id
+            ).data
+
+            to_delete = []
+            for r in nsg_rules:
+                rule_cidr = getattr(r, 'source', '')
+                if rule_cidr == cidr:
+                    to_delete.append(r.id)
+
+            if to_delete:
+                network_client.remove_network_security_group_security_rules(
+                    network_security_group_id=nsg_id,
+                    remove_network_security_group_security_rules_details=oci.core.models.RemoveNetworkSecurityGroupSecurityRulesDetails(
+                        security_rule_ids=to_delete
+                    )
+                )
+                rules_removed = len(to_delete)
+                method = 'NSG'
+
+        # Fallback to Security List (legacy approach)
+        if rules_removed == 0:
+            sec_list_ids = getattr(subnet, 'security_list_ids', [])
+            if sec_list_ids:
+                sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
+                existing = getattr(sec_list, 'ingress_security_rules', [])
+
+                new_rules = []
+                removed_desc = []
+                for r in existing:
+                    rule_cidr = getattr(r, 'source', '')
+                    if rule_cidr == cidr:
+                        rules_removed += 1
+                        removed_desc.append(getattr(r, 'description', 'unnamed'))
+                    else:
+                        new_rules.append(r)
+
+                if rules_removed > 0:
+                    network_client.update_security_list(
+                        security_list_id=sec_list_ids[0],
+                        update_security_list_details=oci.core.models.UpdateSecurityListDetails(
+                            ingress_security_rules=new_rules
+                        )
+                    )
+                    method = 'SecurityList'
+
+        return jsonify({
+            'success': True,
+            'method': method or 'None',
+            'rules_removed': rules_removed,
+            'cidr': cidr
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/list-target-vnics', methods=['POST'])
+@require_auth
+def list_target_vnics():
+    """List VNICs that are available to be attached as secondary (unattached or from terminated instances)."""
+    data = request.json or {}
+    config = build_config(data)
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+        compute_client = oci.core.ComputeClient(config)
+        tenancy = config['tenancy']
+
+        # Get all VNIC attachments to find which VNICs are in use
+        attachments = compute_client.list_vnic_attachments(compartment_id=tenancy).data
+        attached_vnic_ids = set()
+        for att in attachments:
+            if getattr(att, 'lifecycle_state', '') not in ('DETACHED', 'TERMINATED'):
+                attached_vnic_ids.add(att.vnic_id)
+
+        # List all subnets to find VNICs
+        vcns = network_client.list_vcns(compartment_id=tenancy).data
+        all_vnics = []
+
+        for vcn in vcns:
+            subnets = network_client.list_subnets(compartment_id=tenancy, vcn_id=vcn.id).data
+            for sn in subnets:
+                if getattr(sn, 'lifecycle_state', '') != 'AVAILABLE':
+                    continue
+                # List VNICs in this subnet via private IPs
+                try:
+                    private_ips = network_client.list_private_ips(subnet_id=sn.id).data
+                    for ip in private_ips:
+                        if ip.vnic_id and ip.vnic_id not in attached_vnic_ids:
+                            try:
+                                vnic = network_client.get_vnic(vnic_id=ip.vnic_id).data
+                                all_vnics.append({
+                                    'id': vnic.id,
+                                    'display_name': vnic.display_name or 'Unnamed',
+                                    'private_ip': vnic.private_ip or ip.ip_address,
+                                    'public_ip': vnic.public_ip or None,
+                                    'subnet_id': sn.id,
+                                    'subnet_name': sn.display_name or 'Unnamed',
+                                    'state': vnic.lifecycle_state,
+                                    'is_primary': getattr(vnic, 'is_primary', False)
+                                })
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        return jsonify({'success': True, 'vnics': all_vnics})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/create-secondary-vnic', methods=['POST'])
+@require_auth
+def create_secondary_vnic():
+    """Create a standalone VNIC (not attached to any instance) that can be used as a target."""
+    data = request.json or {}
+    config = build_config(data)
+    subnet_id = data.get('subnet_id')
+    display_name = data.get('display_name', 'target-vnic')
+    assign_public_ip = data.get('assign_public_ip', True)
+
+    if not subnet_id:
+        return jsonify({'success': False, 'error': 'subnet_id required'})
+
+    try:
+        oci.config.validate_config(config)
+        network_client = oci.core.VirtualNetworkClient(config)
+
+        # Create a VNIC directly in the subnet
+        create_vnic_details = oci.core.models.CreateVnicDetails(
+            subnet_id=subnet_id,
+            display_name=display_name,
+            assign_public_ip=assign_public_ip,
+            hostname_label=display_name.lower().replace('_', '-').replace(' ', '-')[:15]
+        )
+
+        # We create a private IP which implicitly creates a VNIC
+        # Actually, let's use CreatePrivateIp to create a VNIC
+        # Or better: create a VNIC attachment with no instance (not possible)
+        # Alternative: Create a dummy instance and detach its VNIC, then terminate instance
+        # Better approach: Use CreateVnic endpoint if available, or create a minimal instance
+
+        # OCI doesn't allow creating a VNIC without an instance directly via standard API
+        # Workaround: Create a minimal instance, detach its VNIC, then terminate the instance
+        compute_client = oci.core.ComputeClient(config)
+        identity_client = oci.identity.IdentityClient(config)
+
+        ads = identity_client.list_availability_domains(compartment_id=config['tenancy']).data
+        ad = ads[0].name if ads else ''
+
+        # Get a micro image for fast creation
+        images = compute_client.list_images(
+            compartment_id=config['tenancy'],
+            shape='VM.Standard.E2.1.Micro',
+            operating_system='Oracle Linux'
+        ).data
+        image = images[0] if images else None
+        if not image:
+            return jsonify({'success': False, 'error': 'No suitable image found for temporary instance'})
+
+        # Launch minimal instance
+        instance_details = oci.core.models.LaunchInstanceDetails(
+            compartment_id=config['tenancy'],
+            availability_domain=ad,
+            shape='VM.Standard.E2.1.Micro',
+            source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image.id),
+            create_vnic_details=create_vnic_details,
+            display_name='temp-vnic-creator-' + str(int(time.time())),
+            metadata={"ssh_authorized_keys": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0"}
+        )
+
+        launch_response = compute_client.launch_instance(instance_details)
+        instance_id = launch_response.data.id
+        instance_name = launch_response.data.display_name
+
+        # Wait for RUNNING state
+        max_wait = 60
+        waited = 0
+        while waited < max_wait:
+            inst = compute_client.get_instance(instance_id=instance_id).data
+            if inst.lifecycle_state == 'RUNNING':
+                break
+            if inst.lifecycle_state in ('TERMINATED', 'TERMINATING'):
+                return jsonify({'success': False, 'error': 'Temp instance failed to start'})
+            time.sleep(2)
+            waited += 2
+
+        # Get the primary VNIC attachment
+        vnic_attachments = compute_client.list_vnic_attachments(
+            compartment_id=config['tenancy'],
+            instance_id=instance_id
+        ).data
+
+        if not vnic_attachments:
+            compute_client.terminate_instance(instance_id=instance_id)
+            return jsonify({'success': False, 'error': 'No VNIC attachment found on temp instance'})
+
+        primary_vnic_id = vnic_attachments[0].vnic_id
+
+        # Detach the VNIC
+        compute_client.detach_vnic(vnic_attachment_id=vnic_attachments[0].id)
+
+        # Wait for detachment
+        time.sleep(3)
+
+        # Terminate the temp instance
+        compute_client.terminate_instance(instance_id=instance_id)
+
+        # Get the detached VNIC details
+        vnic = network_client.get_vnic(vnic_id=primary_vnic_id).data
+
+        return jsonify({
+            'success': True,
+            'vnic_id': vnic.id,
+            'vnic_name': vnic.display_name or display_name,
+            'private_ip': vnic.private_ip,
+            'public_ip': vnic.public_ip,
+            'subnet_id': subnet_id,
+            'message': 'Created detached VNIC by launching and terminating a temp instance'
+        })
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -829,6 +1060,23 @@ def run_automated_creation(config, account_config, compute_client, network_clien
             )
             add_log(f"Debug -> ARM shape config: ocpus={ocpus}, memory={memory}")
 
+        # Check if target VNIC mode is enabled
+        target_vnic_id = account_config.get('target_vnic_id', '').strip()
+        use_target_vnic = account_config.get('use_target_vnic', False) and target_vnic_id
+
+        if use_target_vnic:
+            add_log(f"Target VNIC mode: using pre-created VNIC {target_vnic_id[:20]}...")
+            create_vnic = oci.core.models.CreateVnicDetails(
+                subnet_id=subnet_id,
+                assign_public_ip=True,
+                nsg_ids=[]
+            )
+        else:
+            create_vnic = oci.core.models.CreateVnicDetails(
+                subnet_id=subnet_id,
+                assign_public_ip=True
+            )
+
         instance_details = oci.core.models.LaunchInstanceDetails(
             compartment_id=config['tenancy'],
             availability_domain=ad_list[0] if ad_list else '',
@@ -838,10 +1086,7 @@ def run_automated_creation(config, account_config, compute_client, network_clien
                 image_id=image_id,
                 boot_volume_size_in_gbs=boot_gb
             ),
-            create_vnic_details=oci.core.models.CreateVnicDetails(
-                subnet_id=subnet_id,
-                assign_public_ip=True
-            ),
+            create_vnic_details=create_vnic,
             metadata={"ssh_authorized_keys": ssh_key},
             display_name=target_name
         )
@@ -875,9 +1120,26 @@ def run_automated_creation(config, account_config, compute_client, network_clien
 
             try:
                 add_log(f"Attempt {attempts}: sending instance launch request...")
-                compute_client.launch_instance(instance_details)
+                launch_resp = compute_client.launch_instance(instance_details)
+                instance_id = launch_resp.data.id
                 add_log("SUCCESS! Instance created and running.")
                 success = True
+
+                # Attach target VNIC as secondary if enabled
+                if use_target_vnic and target_vnic_id and instance_id:
+                    try:
+                        add_log(f"Attaching target VNIC {target_vnic_id[:20]}... to instance...")
+                        attach_details = oci.core.models.AttachVnicDetails(
+                            instance_id=instance_id,
+                            vnic_id=target_vnic_id,
+                            display_name=target_name + '-secondary',
+                            nic_index=1
+                        )
+                        compute_client.attach_vnic(attach_details)
+                        add_log("Target VNIC attached successfully as secondary interface.")
+                    except Exception as vnic_err:
+                        add_log(f"Target VNIC attach failed: {str(vnic_err)[:120]}")
+
                 if telegram_bot_token and telegram_chat_id:
                     instance_name = account_config.get('display_name', 'AlwaysFree-Bot')
                     shape = account_config.get('shape', 'Unknown')
