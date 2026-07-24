@@ -298,9 +298,14 @@ def test_launch():
 @app.route('/api/list-vnics', methods=['POST'])
 @require_auth
 def list_vnics():
-    """List VNICs (network interfaces) for debugging network setup."""
+    """List VNICs (network interfaces) for debugging network setup.
+
+    Supports optional filtering by VCN ID via 'vcn_id' in request body.
+    Returns VCN name, subnet name, and instance display name for each VNIC.
+    """
     data = request.json or {}
     config = build_config(data)
+    target_vcn_id = data.get('vcn_id', '').strip() or None
 
     try:
         oci.config.validate_config(config)
@@ -308,25 +313,55 @@ def list_vnics():
         network_client = oci.core.VirtualNetworkClient(config)
         tenancy = config['tenancy']
 
+        # Pre-fetch all VCNs and subnets for name resolution
+        vcns = {v.id: v for v in network_client.list_vcns(compartment_id=tenancy).data}
+        subnets = {s.id: s for s in network_client.list_subnets(compartment_id=tenancy).data}
+
+        # Also fetch instances for name resolution
+        instances = {i.id: i for i in compute_client.list_instances(compartment_id=tenancy).data}
+
         # List all VNIC attachments in the tenancy
         vnics = []
         vnic_attachments = compute_client.list_vnic_attachments(compartment_id=tenancy).data
+
         for att in vnic_attachments:
             try:
                 vnic = network_client.get_vnic(vnic_id=att.vnic_id).data
+                subnet = subnets.get(vnic.subnet_id)
+                vcn = vcns.get(subnet.vcn_id) if subnet else None
+
+                # Skip if filtering by VCN and this VNIC is not in that VCN
+                if target_vcn_id and (not vcn or vcn.id != target_vcn_id):
+                    continue
+
+                instance = instances.get(att.instance_id)
+
                 vnics.append({
                     'id': vnic.id,
                     'display_name': vnic.display_name or 'Unnamed',
                     'private_ip': vnic.private_ip,
                     'public_ip': vnic.public_ip or 'None',
                     'subnet_id': vnic.subnet_id,
+                    'subnet_name': subnet.display_name if subnet else 'Unknown',
+                    'vcn_id': vcn.id if vcn else 'Unknown',
+                    'vcn_name': vcn.display_name if vcn else 'Unknown',
                     'lifecycle_state': vnic.lifecycle_state,
-                    'is_primary': getattr(att, 'is_primary', False)
+                    'is_primary': getattr(att, 'is_primary', False),
+                    'instance_id': att.instance_id,
+                    'instance_name': instance.display_name if instance else 'Unknown'
                 })
             except Exception:
                 pass
 
-        return jsonify({'success': True, 'vnics': vnics})
+        # Build VCN summary for the dropdown
+        vcn_list = [{'id': v.id, 'name': v.display_name or 'Unnamed'} for v in vcns.values()]
+
+        return jsonify({
+            'success': True,
+            'vnics': vnics,
+            'vcns': vcn_list,
+            'filtered_by_vcn': target_vcn_id
+        })
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -507,9 +542,8 @@ def scan_security_rules():
                     'type': 'NSG',
                     'direction': r.direction,
                     'protocol': r.protocol,
-                    'source': getattr(r, 'source', 'N/A') if r.direction == 'INGRESS' else 'N/A',
-                    'destination': getattr(r, 'destination', 'N/A') if r.direction == 'EGRESS' else 'N/A',
-                    'port_range': None,  # NSG rules may have port info in tcp_options
+                    'source': getattr(r, 'source', 'N/A'),
+                    'destination': getattr(r, 'destination', 'N/A'),
                     'description': getattr(r, 'description', '')
                 })
 
@@ -517,8 +551,6 @@ def scan_security_rules():
         sec_list_ids = getattr(subnet, 'security_list_ids', [])
         for sec_id in sec_list_ids:
             sec_list = network_client.get_security_list(security_list_id=sec_id).data
-
-            # Ingress rules
             for r in getattr(sec_list, 'ingress_security_rules', []):
                 tcp_opts = getattr(r, 'tcp_options', None)
                 port_range = None
@@ -532,26 +564,6 @@ def scan_security_rules():
                     'direction': 'INGRESS',
                     'protocol': getattr(r, 'protocol', 'N/A'),
                     'source': getattr(r, 'source', 'N/A'),
-                    'destination': 'N/A',
-                    'port_range': port_range,
-                    'description': getattr(r, 'description', '')
-                })
-
-            # Egress rules
-            for r in getattr(sec_list, 'egress_security_rules', []):
-                tcp_opts = getattr(r, 'tcp_options', None)
-                port_range = None
-                if tcp_opts and getattr(tcp_opts, 'destination_port_range', None):
-                    port_range = str(tcp_opts.destination_port_range.min)
-                    if tcp_opts.destination_port_range.max != tcp_opts.destination_port_range.min:
-                        port_range += '-' + str(tcp_opts.destination_port_range.max)
-
-                rules.append({
-                    'type': 'SecurityList',
-                    'direction': 'EGRESS',
-                    'protocol': getattr(r, 'protocol', 'N/A'),
-                    'source': 'N/A',
-                    'destination': getattr(r, 'destination', 'N/A'),
                     'port_range': port_range,
                     'description': getattr(r, 'description', '')
                 })
