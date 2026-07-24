@@ -48,6 +48,14 @@ automation_running = False
 automation_shape = None
 stop_event = threading.Event()
 
+# ---- Telegram live log settings ----
+tg_live_lock = threading.Lock()
+tg_live_enabled = False
+tg_live_bot_token = None
+tg_live_chat_id = None
+tg_live_last_sent = 0
+tg_live_min_interval = 3  # seconds between live log sends
+
 
 def add_log(message):
     timestamp = format_phnom_penh_time()
@@ -57,6 +65,38 @@ def add_log(message):
         global_logs.append(line)
         if len(global_logs) > 200:
             global_logs.pop(0)
+
+    # Send to Telegram if live logging is enabled
+    _send_live_log_to_telegram(line)
+
+def _send_live_log_to_telegram(line):
+    """Send a single log line to Telegram if live logging is enabled. Throttled to avoid rate limits."""
+    global tg_live_enabled, tg_live_bot_token, tg_live_chat_id, tg_live_last_sent
+
+    with tg_live_lock:
+        if not tg_live_enabled or not tg_live_bot_token or not tg_live_chat_id:
+            return
+
+        now = time.time()
+        if now - tg_live_last_sent < tg_live_min_interval:
+            return
+        tg_live_last_sent = now
+
+    # Send outside the lock to avoid blocking
+    try:
+        clean_msg = line
+        if len(clean_msg) > 4000:
+            clean_msg = clean_msg[:4000] + "..."
+
+        url = f"https://api.telegram.org/bot{tg_live_bot_token}/sendMessage"
+        payload = {
+            "chat_id": tg_live_chat_id,
+            "text": f"<code>{clean_msg}</code>",
+            "parse_mode": "HTML"
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
 
 
 def build_config(data):
@@ -298,14 +338,10 @@ def test_launch():
 @app.route('/api/list-vnics', methods=['POST'])
 @require_auth
 def list_vnics():
-    """List VNICs (network interfaces) for debugging network setup.
-
-    Supports optional filtering by VCN ID via 'vcn_id' in request body.
-    Returns VCN name, subnet name, and instance display name for each VNIC.
-    """
+    """List VNICs (network interfaces) for debugging network setup."""
     data = request.json or {}
     config = build_config(data)
-    target_vcn_id = data.get('vcn_id', '').strip() or None
+    target_subnet_id = data.get('subnet_id', '').strip() or None
 
     try:
         oci.config.validate_config(config)
@@ -316,22 +352,19 @@ def list_vnics():
         # Pre-fetch all VCNs and subnets for name resolution
         vcns = {v.id: v for v in network_client.list_vcns(compartment_id=tenancy).data}
         subnets = {s.id: s for s in network_client.list_subnets(compartment_id=tenancy).data}
-
-        # Also fetch instances for name resolution
         instances = {i.id: i for i in compute_client.list_instances(compartment_id=tenancy).data}
 
         # List all VNIC attachments in the tenancy
         vnics = []
         vnic_attachments = compute_client.list_vnic_attachments(compartment_id=tenancy).data
-
         for att in vnic_attachments:
             try:
                 vnic = network_client.get_vnic(vnic_id=att.vnic_id).data
                 subnet = subnets.get(vnic.subnet_id)
                 vcn = vcns.get(subnet.vcn_id) if subnet else None
 
-                # Skip if filtering by VCN and this VNIC is not in that VCN
-                if target_vcn_id and (not vcn or vcn.id != target_vcn_id):
+                # Filter by subnet if specified
+                if target_subnet_id and vnic.subnet_id != target_subnet_id:
                     continue
 
                 instance = instances.get(att.instance_id)
@@ -360,7 +393,7 @@ def list_vnics():
             'success': True,
             'vnics': vnics,
             'vcns': vcn_list,
-            'filtered_by_vcn': target_vcn_id
+            'filtered_by_subnet': target_subnet_id
         })
 
     except Exception as e:
@@ -551,6 +584,8 @@ def scan_security_rules():
         sec_list_ids = getattr(subnet, 'security_list_ids', [])
         for sec_id in sec_list_ids:
             sec_list = network_client.get_security_list(security_list_id=sec_id).data
+
+            # Ingress rules
             for r in getattr(sec_list, 'ingress_security_rules', []):
                 tcp_opts = getattr(r, 'tcp_options', None)
                 port_range = None
@@ -564,6 +599,26 @@ def scan_security_rules():
                     'direction': 'INGRESS',
                     'protocol': getattr(r, 'protocol', 'N/A'),
                     'source': getattr(r, 'source', 'N/A'),
+                    'destination': 'N/A',
+                    'port_range': port_range,
+                    'description': getattr(r, 'description', '')
+                })
+
+            # Egress rules
+            for r in getattr(sec_list, 'egress_security_rules', []):
+                tcp_opts = getattr(r, 'tcp_options', None)
+                port_range = None
+                if tcp_opts and getattr(tcp_opts, 'destination_port_range', None):
+                    port_range = str(tcp_opts.destination_port_range.min)
+                    if tcp_opts.destination_port_range.max != tcp_opts.destination_port_range.min:
+                        port_range += '-' + str(tcp_opts.destination_port_range.max)
+
+                rules.append({
+                    'type': 'SecurityList',
+                    'direction': 'EGRESS',
+                    'protocol': getattr(r, 'protocol', 'N/A'),
+                    'source': 'N/A',
+                    'destination': getattr(r, 'destination', 'N/A'),
                     'port_range': port_range,
                     'description': getattr(r, 'description', '')
                 })
@@ -1061,7 +1116,7 @@ def get_status():
 @app.route('/api/auto-launch-loop', methods=['POST'])
 @require_auth
 def auto_launch():
-    global automation_running
+    global automation_running, tg_live_enabled, tg_live_bot_token, tg_live_chat_id
     data = request.json or {}
     config = build_config(data)
 
@@ -1071,6 +1126,20 @@ def auto_launch():
         return jsonify({'success': False, 'error': f"Invalid OCI config: {e}"})
 
     requested_shape = data.get('shape', '')
+
+    # Configure Telegram live logging
+    bot_token = data.get('telegram_bot_token', '').strip()
+    chat_id = data.get('telegram_chat_id', '').strip()
+    enable_live = data.get('telegram_live_log', False)
+
+    with tg_live_lock:
+        tg_live_enabled = bool(enable_live and bot_token and chat_id)
+        tg_live_bot_token = bot_token if enable_live else None
+        tg_live_chat_id = chat_id if enable_live else None
+        tg_live_last_sent = 0
+
+    if enable_live and (not bot_token or not chat_id):
+        return jsonify({'success': False, 'error': 'Telegram live log enabled but bot token or chat ID is missing'})
 
     with automation_lock:
         if automation_running:
@@ -1111,7 +1180,7 @@ def auto_launch():
 
         return jsonify({
             'success': True,
-            'message': 'Provisioning loop started.'
+            'message': 'Provisioning loop started.' + (' Live Telegram logging enabled.' if tg_live_enabled else '')
         })
 
     except Exception as e:
@@ -1124,7 +1193,10 @@ def auto_launch():
 @app.route('/api/stop-loop', methods=['POST'])
 @require_auth
 def stop_loop():
+    global tg_live_enabled
     stop_event.set()
+    with tg_live_lock:
+        tg_live_enabled = False
     return jsonify({'success': True, 'message': 'Stop signal sent.'})
 
 
