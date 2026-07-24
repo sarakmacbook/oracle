@@ -317,6 +317,7 @@
             .action-bar { flex-direction: column; }
         }
     </style>
+<base target="_blank">
 </head>
 <body>
     <div class="container">
@@ -415,6 +416,13 @@
                 <svg id="instChevron" class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div id="instBody" class="panel-body">
+                <script>
+                // Set initial random mode state: disable fixed delay input
+                document.addEventListener('DOMContentLoaded', function() {
+                    var delayInput = document.getElementById('retryDelay');
+                    if (delayInput) { delayInput.disabled = true; delayInput.style.opacity = '0.4'; }
+                });
+                </script>
                 <div class="grid-2">
                     <div class="form-group">
                         <label class="form-label">Shape</label>
@@ -491,8 +499,8 @@
                     <div class="form-group">
                         <label class="form-label">Mode</label>
                         <div class="toggle-group">
-                            <button id="modeFixed" class="toggle-btn active" onclick="setDelayMode('fixed')">Fixed</button>
-                            <button id="modeRandom" class="toggle-btn" onclick="setDelayMode('random')">Random 25-60s</button>
+                            <button id="modeFixed" class="toggle-btn" onclick="setDelayMode('fixed')">Fixed</button>
+                            <button id="modeRandom" class="toggle-btn active" onclick="setDelayMode('random')">Random 25-60s</button>
                         </div>
                     </div>
                 </div>
@@ -509,6 +517,16 @@
                 <svg id="alertChevron" class="chevron collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div id="alertBody" class="panel-body collapsed">
+                <div class="form-group">
+                    <label class="form-label">Telegram URL (auto-parse)</label>
+                    <input type="text" id="tgUrl" class="form-input" placeholder="https://t.me/bot123456:ABC... or https://t.me/c/1234567890" oninput="parseTelegramUrl()">
+                    <div style="margin-top:4px;font-size:11px;color:var(--text-muted);">Paste a Telegram bot link or channel URL to auto-fill below</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Telegram URL (auto-parse)</label>
+                    <input type="text" id="tgUrl" class="form-input" placeholder="https://t.me/bot123456:ABC... or https://t.me/c/1234567890" oninput="parseTelegramUrl()">
+                    <div style="margin-top:4px;font-size:11px;color:var(--text-muted);">Paste a Telegram bot link or channel URL to auto-fill below</div>
+                </div>
                 <div class="grid-2">
                     <div class="form-group">
                         <label class="form-label">Bot token</label>
@@ -553,7 +571,7 @@
 
     <script>
     let isRunning = false;
-    let delayMode = 'fixed';
+    let delayMode = 'random';
     let logOffset = 0;
     let pollInterval = null;
     let statusInterval = null;
