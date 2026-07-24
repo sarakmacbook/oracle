@@ -371,7 +371,9 @@
                     <button class="btn" id="quotaBtn" onclick="checkQuota()">Check free tier</button>
                     <button class="btn" id="scanBtn" onclick="scanImages()">Scan OS images</button>
                 </div>
-
+                <div class="btn-row">
+                    <button class="btn" id="scanSubnetBtn" onclick="scanSubnets()">Scan subnets</button>
+                </div>
                 <div id="quotaPanel" class="quota-panel"></div>
                 <div class="checkbox-row">
                     <input type="checkbox" id="allOS" onchange="onAllOSChange()">
@@ -423,13 +425,6 @@
                 <svg id="instChevron" class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div id="instBody" class="panel-body">
-                <script>
-                // Set initial random mode state: disable fixed delay input
-                document.addEventListener('DOMContentLoaded', function() {
-                    var delayInput = document.getElementById('retryDelay');
-                    if (delayInput) { delayInput.disabled = true; delayInput.style.opacity = '0.4'; }
-                });
-                </script>
                 <div class="grid-2">
                     <div class="form-group">
                         <label class="form-label">Shape</label>
@@ -506,8 +501,8 @@
                     <div class="form-group">
                         <label class="form-label">Mode</label>
                         <div class="toggle-group">
-                            <button id="modeFixed" class="toggle-btn" onclick="setDelayMode('fixed')">Fixed</button>
-                            <button id="modeRandom" class="toggle-btn active" onclick="setDelayMode('random')">Random 25-60s</button>
+                            <button id="modeFixed" class="toggle-btn active" onclick="setDelayMode('fixed')">Fixed</button>
+                            <button id="modeRandom" class="toggle-btn" onclick="setDelayMode('random')">Random 25-60s</button>
                         </div>
                     </div>
                 </div>
@@ -524,8 +519,6 @@
                 <svg id="alertChevron" class="chevron collapsed" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div id="alertBody" class="panel-body collapsed">
-                
-                
                 <div class="grid-2">
                     <div class="form-group">
                         <label class="form-label">Bot token</label>
@@ -535,6 +528,13 @@
                         <label class="form-label">Chat ID</label>
                         <input type="text" id="tgChat" class="form-input" placeholder="@channel or ID">
                     </div>
+                </div>
+                <div class="checkbox-row" style="margin-top:8px;">
+                    <input type="checkbox" id="tgLiveLog" onchange="onTgLiveLogChange()">
+                    <label for="tgLiveLog">Stream all live output logs to Telegram</label>
+                </div>
+                <div id="tgLiveWarning" style="display:none;font-size:11px;color:var(--warning);margin-bottom:10px;padding-left:24px;">
+                    Warning: High message volume. Telegram may rate-limit (throttled to 1 msg / 3s).
                 </div>
                 <button class="btn" id="tgTestBtn" onclick="testTelegram()" style="width:100%;">Test connection</button>
                 <div id="tgResult" class="tg-result"></div>
@@ -570,7 +570,7 @@
 
     <script>
     let isRunning = false;
-    let delayMode = 'random';
+    let delayMode = 'fixed';
     let logOffset = 0;
     let pollInterval = null;
     let statusInterval = null;
@@ -660,7 +660,6 @@
         const cpu = document.getElementById('ocpus');
         const ram = document.getElementById('memory');
         const vmName = document.getElementById('vmName');
-
         if (shape === 'VM.Standard.E2.1.Micro') {
             cpu.value = 1; cpu.disabled = true;
             ram.value = 1; ram.disabled = true;
@@ -673,29 +672,16 @@
     }
 
     function getUniqueVmName(base) {
-        // Check if base name already exists in the current value
         const vmName = document.getElementById('vmName');
         const current = vmName.value.trim();
-
-        // If current name already starts with this base, keep it
-        if (current === base || current.startsWith(base + '-')) {
-            return current;
-        }
-
-        // If current name is empty or default, use base
-        if (!current || current === 'AlwaysFree-Bot') {
-            return base;
-        }
-
-        // Otherwise check for duplicates by looking at the current value
-        // Simple logic: if base exists with a number suffix, increment
+        if (current === base || current.startsWith(base + '-')) return current;
+        if (!current || current === 'Arm') return base;
         const regex = new RegExp('^' + base + '(-(\d+))?$');
         const match = current.match(regex);
         if (match) {
             const num = match[2] ? parseInt(match[2]) : 1;
             return base + '-' + (num + 1);
         }
-
         return base;
     }
 
@@ -914,7 +900,7 @@
 
     async function scanSubnets() {
         parseConfig();
-        const btn = document.getElementById('scanSubnetBtn2');
+        const btn = document.getElementById('scanSubnetBtn');
         const select = document.getElementById('subnetSelect');
         const info = document.getElementById('subnetInfo');
         const user = document.getElementById('cfgUser').value;
@@ -974,6 +960,9 @@
         var btn = document.getElementById('scanVnicBtn');
         var user = document.getElementById('cfgUser').value;
         var key = document.getElementById('cfgKey').value;
+        var subnetId = document.getElementById('subnetSelect').value;
+        var vnicSelect = document.getElementById('vnicSelect');
+        var vnicInfo = document.getElementById('vnicInfo');
 
         if (!user || !key) {
             addLog('Error: Credentials required first', 'error');
@@ -988,30 +977,49 @@
         btn.textContent = 'Scanning...';
 
         try {
+            var payload = {
+                user: user,
+                tenancy: document.getElementById('cfgTenancy').value,
+                fingerprint: document.getElementById('cfgFingerprint').value,
+                region: document.getElementById('cfgRegion').value,
+                private_key: key
+            };
+            if (subnetId) payload.subnet_id = subnetId;
+
             var res = await fetch('/api/list-vnics', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user: user,
-                    tenancy: document.getElementById('cfgTenancy').value,
-                    fingerprint: document.getElementById('cfgFingerprint').value,
-                    region: document.getElementById('cfgRegion').value,
-                    private_key: key
-                })
+                body: JSON.stringify(payload)
             });
             var data = await res.json();
 
             if (data.success && data.vnics && data.vnics.length > 0) {
-                addLog('Found ' + data.vnics.length + ' VNIC(s):', 'success');
+                var filterLabel = data.filtered_by_subnet ? ' (target subnet)' : '';
+                addLog('Found ' + data.vnics.length + ' VNIC(s)' + filterLabel + ':', 'success');
+                vnicSelect.innerHTML = '<option value="">-- Select a VNIC --</option>';
                 data.vnics.forEach(function(v) {
-                    addLog('  ' + v.display_name + ' | IP: ' + v.private_ip + ' | Public: ' + (v.public_ip || 'None') + ' | State: ' + v.lifecycle_state);
+                    var primaryBadge = v.is_primary ? ' [PRIMARY]' : '';
+                    addLog('  ' + v.display_name + primaryBadge + ' | Instance: ' + v.instance_name + ' | IP: ' + v.private_ip + ' | Public: ' + (v.public_ip || 'None') + ' | VCN: ' + v.vcn_name + ' | Subnet: ' + v.subnet_name + ' | State: ' + v.lifecycle_state);
+                    var opt = document.createElement('option');
+                    opt.value = v.id;
+                    opt.textContent = v.display_name + primaryBadge + ' (' + v.private_ip + ', ' + v.instance_name + ')';
+                    vnicSelect.appendChild(opt);
                 });
+                vnicInfo.innerHTML = 'Found ' + data.vnics.length + ' VNIC(s). Select one to target.';
+                vnicInfo.style.display = 'block';
             } else if (data.success) {
-                addLog('No VNICs found (no running instances)', 'warn');
+                vnicSelect.innerHTML = '<option value="">-- No VNICs found --</option>';
+                vnicInfo.style.display = 'none';
+                var msg = 'No VNICs found' + (data.filtered_by_subnet ? ' in target subnet' : ' (no running instances)');
+                addLog(msg, 'warn');
             } else {
+                vnicSelect.innerHTML = '<option value="">-- Error --</option>';
+                vnicInfo.style.display = 'none';
                 addLog('VNIC scan failed: ' + (data.error || 'Unknown error'), 'error');
             }
         } catch (err) {
+            vnicSelect.innerHTML = '<option value="">-- Error --</option>';
+            vnicInfo.style.display = 'none';
             addLog('VNIC scan error: ' + err.message, 'error');
         }
 
@@ -1229,6 +1237,7 @@
             ssh_key: ssh,
             telegram_bot_token: document.getElementById('tgToken').value.trim(),
             telegram_chat_id: document.getElementById('tgChat').value.trim(),
+            telegram_live_log: document.getElementById('tgLiveLog').checked,
             retry_delay: parseInt(document.getElementById('retryDelay').value) || 60,
             randomize_delay: delayMode === 'random',
             random_min: 25,
@@ -1308,6 +1317,11 @@
         if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
     }
 
+    function onTgLiveLogChange() {
+        var checked = document.getElementById('tgLiveLog').checked;
+        document.getElementById('tgLiveWarning').style.display = checked ? 'block' : 'none';
+    }
+
     function clearAll() {
         if (isRunning) {
             addLog('Stop the provisioning loop before clearing', 'warn');
@@ -1333,7 +1347,7 @@
         document.getElementById('vnicSelect').innerHTML = '<option value="">-- Scan VNICs first --</option>';
         document.getElementById('vnicInfo').style.display = 'none';
 
-        document.getElementById('vmName').value = 'Arm';
+        document.getElementById('vmName').value = 'AlwaysFree-Bot';
         document.getElementById('ocpus').value = '2';
         document.getElementById('memory').value = '12';
         document.getElementById('bootVol').value = '50';
@@ -1346,7 +1360,12 @@
 
         document.getElementById('tgToken').value = '';
         document.getElementById('tgChat').value = '';
+        document.getElementById('tgLiveLog').checked = false;
+        document.getElementById('tgLiveWarning').style.display = 'none';
         document.getElementById('tgResult').innerHTML = '';
+        document.getElementById('vnicSelect').innerHTML = '<option value="">-- Scan VNICs first --</option>';
+        document.getElementById('vnicInfo').style.display = 'none';
+        document.getElementById('vmName').value = 'Arm';
 
         document.getElementById('quotaPanel').style.display = 'none';
         document.getElementById('quotaPanel').innerHTML = '';
