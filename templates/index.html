@@ -317,7 +317,6 @@
             .action-bar { flex-direction: column; }
         }
     </style>
-<base target="_blank">
 </head>
 <body>
     <div class="container">
@@ -467,23 +466,19 @@
                             <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Source CIDR</label>
                             <input type="text" id="firewallCidr" class="form-input" value="0.0.0.0/0" placeholder="e.g. 0.0.0.0/0" style="font-size:12px;">
                         </div>
+                        <div style="flex:1;">
+                            <label style="font-size:11px;color:var(--text-muted);margin-bottom:4px;display:block;">Direction</label>
+                            <select id="firewallDirection" class="form-select" style="font-size:12px;">
+                                <option value="ingress">Ingress (inbound)</option>
+                                <option value="egress">Egress (outbound)</option>
+                                <option value="both">Both</option>
+                            </select>
+                        </div>
                     </div>
 
                     <div style="display:flex;gap:8px;">
                         <button class="btn" id="scanRulesBtn" onclick="scanSecurityRules()" style="flex:1;padding:8px 12px;font-size:12px;">Scan existing rules</button>
                         <button class="btn" id="openFirewallBtn" onclick="openFirewallNow()" style="flex:1;padding:8px 12px;font-size:12px;">Open port(s) now</button>
-                    </div>
-                    <div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end;">
-                        <div style="flex:1;">
-                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-                                <label style="font-size:11px;color:var(--text-muted);display:block;">Delete by Source CIDR</label>
-                                <button class="btn" id="scanCidrBtn" onclick="scanCidrs()" style="padding:2px 8px;font-size:10px;flex:none;">Scan CIDRs</button>
-                            </div>
-                            <select id="deleteCidrSelect" class="form-select" style="font-size:12px;">
-                                <option value="">-- Scan to populate --</option>
-                            </select>
-                        </div>
-                        <button class="btn btn-danger" id="deleteCidrBtn" onclick="deleteCidrNow()" style="flex:1;padding:8px 12px;font-size:12px;">Delete selected</button>
                     </div>
                     <div id="firewallResult" style="margin-top:8px;font-size:11px;display:none;"></div>
                 </div>
@@ -983,8 +978,9 @@
         var user = document.getElementById('cfgUser').value;
         var key = document.getElementById('cfgKey').value;
         var subnetId = document.getElementById('subnetSelect').value;
-        var ports = document.getElementById('firewallPorts').value.trim();
-        var cidr = document.getElementById('firewallCidr').value.trim();
+        var ports = document.getElementById('firewallPorts').value.trim() || 'all';
+        var cidr = document.getElementById('firewallCidr').value.trim() || '0.0.0.0/0';
+        var direction = document.getElementById('firewallDirection').value;
 
         if (!user || !key) {
             addLog('Error: Credentials required first', 'error');
@@ -994,6 +990,16 @@
             addLog('Error: Select a subnet first (scan subnets)', 'error');
             result.style.display = 'block';
             result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
+            return;
+        }
+
+        // Confirmation prompt
+        var dirLabel = direction === 'ingress' ? 'INBOUND' : direction === 'egress' ? 'OUTBOUND' : 'INBOUND + OUTBOUND';
+        var confirmMsg = 'Really?\n\nOpen ' + ports + ' ' + dirLabel + ' from ' + cidr + ' to the public internet?';
+        if (!confirm(confirmMsg)) {
+            addLog('Firewall action cancelled by user', 'warn');
+            result.style.display = 'block';
+            result.innerHTML = '<span style="color:var(--warning)">Action cancelled</span>';
             return;
         }
 
@@ -1013,7 +1019,8 @@
                     private_key: key,
                     subnet_id: subnetId,
                     ports: ports,
-                    cidr: cidr
+                    cidr: cidr,
+                    direction: direction
                 })
             });
             var data = await res.json();
@@ -1024,8 +1031,8 @@
                     result.innerHTML = '<span style="color:var(--positive)">Rule(s) already exist for ' + data.ports + ' from ' + data.cidr + '</span>';
                     addLog('Firewall rules already exist', 'success');
                 } else {
-                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
-                    addLog('Opened port(s) ' + data.ports + ' from ' + data.cidr + ' via ' + data.method, 'success');
+                    result.innerHTML = '<span style="color:var(--positive)">Opened ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method + ' (' + data.rules_added + ' rule(s))</span>';
+                    addLog('Opened port(s) ' + data.ports + ' (' + data.direction + ') from ' + data.cidr + ' via ' + data.method, 'success');
                 }
             } else {
                 result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
@@ -1039,76 +1046,6 @@
 
         btn.disabled = false;
         btn.textContent = 'Open port(s) now';
-    }
-
-    async function scanCidrs() {
-        parseConfig();
-        var btn = document.getElementById('scanCidrBtn');
-        var select = document.getElementById('deleteCidrSelect');
-        var user = document.getElementById('cfgUser').value;
-        var key = document.getElementById('cfgKey').value;
-        var subnetId = document.getElementById('subnetSelect').value;
-
-        if (!user || !key) {
-            addLog('Error: Credentials required first', 'error');
-            return;
-        }
-        if (!subnetId) {
-            addLog('Error: Select a subnet first (scan subnets)', 'error');
-            return;
-        }
-
-        btn.disabled = true;
-        btn.textContent = 'Scanning...';
-        select.innerHTML = '<option>Scanning...</option>';
-
-        try {
-            var res = await fetch('/api/scan-security-rules', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user: user,
-                    tenancy: document.getElementById('cfgTenancy').value,
-                    fingerprint: document.getElementById('cfgFingerprint').value,
-                    region: document.getElementById('cfgRegion').value,
-                    private_key: key,
-                    subnet_id: subnetId
-                })
-            });
-            var data = await res.json();
-
-            if (data.success) {
-                var cidrs = new Set();
-                data.rules.forEach(function(r) {
-                    if (r.direction === 'INGRESS' && r.source && r.source !== 'N/A') {
-                        cidrs.add(r.source);
-                    }
-                });
-                var cidrList = Array.from(cidrs).sort();
-                if (cidrList.length > 0) {
-                    select.innerHTML = '';
-                    cidrList.forEach(function(c) {
-                        var opt = document.createElement('option');
-                        opt.value = c;
-                        opt.textContent = c;
-                        select.appendChild(opt);
-                    });
-                    addLog('Found ' + cidrList.length + ' unique source CIDR(s)', 'success');
-                } else {
-                    select.innerHTML = '<option value="">-- No ingress CIDRs found --</option>';
-                    addLog('No ingress source CIDRs found', 'warn');
-                }
-            } else {
-                select.innerHTML = '<option value="">-- Error: ' + (data.error || 'Unknown') + ' --</option>';
-                addLog('CIDR scan failed: ' + data.error, 'error');
-            }
-        } catch (err) {
-            select.innerHTML = '<option value="">-- Error --</option>';
-            addLog('CIDR scan error: ' + err.message, 'error');
-        }
-
-        btn.disabled = false;
-        btn.textContent = 'Scan CIDRs';
     }
 
     async function scanSecurityRules() {
@@ -1179,76 +1116,6 @@
 
     function onAllOSChange() {
         document.getElementById('imageSelect').innerHTML = '<option value="">-- Scan images --</option>';
-    }
-
-    async function deleteCidrNow() {
-        parseConfig();
-        var btn = document.getElementById('deleteCidrBtn');
-        var result = document.getElementById('firewallResult');
-        var user = document.getElementById('cfgUser').value;
-        var key = document.getElementById('cfgKey').value;
-        var subnetId = document.getElementById('subnetSelect').value;
-        var cidr = document.getElementById('deleteCidrSelect').value;
-
-        if (!user || !key) {
-            addLog('Error: Credentials required first', 'error');
-            return;
-        }
-        if (!subnetId) {
-            addLog('Error: Select a subnet first (scan subnets)', 'error');
-            result.style.display = 'block';
-            result.innerHTML = '<span style="color:var(--warning)">Select a subnet first</span>';
-            return;
-        }
-        if (!cidr) {
-            addLog('Error: Select a CIDR from the dropdown to delete', 'error');
-            result.style.display = 'block';
-            result.innerHTML = '<span style="color:var(--warning)">Select a CIDR first (click Scan CIDRs)</span>';
-            return;
-        }
-
-        btn.disabled = true;
-        btn.textContent = 'Deleting...';
-        result.style.display = 'none';
-
-        try {
-            var res = await fetch('/api/delete-cidr', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    user: user,
-                    tenancy: document.getElementById('cfgTenancy').value,
-                    fingerprint: document.getElementById('cfgFingerprint').value,
-                    region: document.getElementById('cfgRegion').value,
-                    private_key: key,
-                    subnet_id: subnetId,
-                    cidr: cidr
-                })
-            });
-            var data = await res.json();
-
-            result.style.display = 'block';
-            if (data.success) {
-                if (data.rules_removed === 0) {
-                    result.innerHTML = '<span style="color:var(--warning)">No matching rules found for ' + data.cidr + '</span>';
-                    addLog('No rules to delete for CIDR ' + data.cidr, 'warn');
-                } else {
-                    result.innerHTML = '<span style="color:var(--positive)">Deleted ' + data.rules_removed + ' rule(s) for ' + data.cidr + ' via ' + data.method + '</span>';
-                    addLog('Deleted ' + data.rules_removed + ' rule(s) for CIDR ' + data.cidr + ' via ' + data.method, 'success');
-                    scanCidrs();
-                }
-            } else {
-                result.innerHTML = '<span style="color:var(--danger)">Failed: ' + data.error + '</span>';
-                addLog('Delete CIDR failed: ' + data.error, 'error');
-            }
-        } catch (err) {
-            result.style.display = 'block';
-            result.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
-            addLog('Delete CIDR request error: ' + err.message, 'error');
-        }
-
-        btn.disabled = false;
-        btn.textContent = 'Delete selected';
     }
 
     async function testTelegram() {

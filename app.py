@@ -335,12 +335,12 @@ def list_vnics():
 @app.route('/api/open-firewall', methods=['POST'])
 @require_auth
 def open_firewall():
-    """Add ingress rule(s) to subnet's security list or NSG."""
     data = request.json or {}
     config = build_config(data)
     subnet_id = data.get('subnet_id')
-    ports = data.get('ports', 'all')  # "all" or "22,80,443"
+    ports = data.get('ports', 'all')
     cidr = data.get('cidr', '0.0.0.0/0')
+    direction = data.get('direction', 'ingress')
 
     if not subnet_id:
         return jsonify({'success': False, 'error': 'subnet_id required'})
@@ -351,31 +351,40 @@ def open_firewall():
 
         subnet = network_client.get_subnet(subnet_id=subnet_id).data
 
-        # Parse ports
         port_list = []
         if ports == 'all' or ports == '*':
             port_list = ['all']
         else:
             port_list = [p.strip() for p in str(ports).split(',') if p.strip()]
 
-        # Try NSG first (modern approach)
+        directions_to_add = []
+        if direction in ('ingress', 'both'):
+            directions_to_add.append('INGRESS')
+        if direction in ('egress', 'both'):
+            directions_to_add.append('EGRESS')
+
         nsg_ids = getattr(subnet, 'network_security_group_ids', [])
         if nsg_ids and len(nsg_ids) > 0:
             rules = []
-            for port in port_list:
-                if port == 'all':
-                    rules.append(oci.core.models.AddSecurityRuleDetails(
-                        direction='INGRESS', protocol='all', source=cidr,
-                        description='OCI Provisioner: all traffic'
-                    ))
-                else:
-                    rules.append(oci.core.models.AddSecurityRuleDetails(
-                        direction='INGRESS', protocol='6', source=cidr,  # TCP
-                        tcp_options=oci.core.models.TcpOptions(
-                            destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
-                        ),
-                        description='OCI Provisioner: port ' + port
-                    ))
+            for dir in directions_to_add:
+                for port in port_list:
+                    if port == 'all':
+                        rules.append(oci.core.models.AddSecurityRuleDetails(
+                            direction=dir, protocol='all',
+                            source=cidr if dir == 'INGRESS' else None,
+                            destination=cidr if dir == 'EGRESS' else None,
+                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
+                        ))
+                    else:
+                        rules.append(oci.core.models.AddSecurityRuleDetails(
+                            direction=dir, protocol='6',
+                            source=cidr if dir == 'INGRESS' else None,
+                            destination=cidr if dir == 'EGRESS' else None,
+                            tcp_options=oci.core.models.TcpOptions(
+                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
+                            ),
+                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
+                        ))
 
             result = network_client.add_network_security_group_security_rules(
                 network_security_group_id=nsg_ids[0],
@@ -389,55 +398,68 @@ def open_firewall():
                 'nsg_id': nsg_ids[0],
                 'rules_added': len(result.data.security_rules),
                 'ports': ports,
-                'cidr': cidr
+                'cidr': cidr,
+                'direction': direction
             })
 
-        # Fallback to Security List (legacy approach)
         sec_list_ids = getattr(subnet, 'security_list_ids', [])
         if not sec_list_ids:
             return jsonify({'success': False, 'error': 'No security list or NSG found on subnet'})
 
         sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
-        existing = getattr(sec_list, 'ingress_security_rules', [])
 
-        new_rules = list(existing)
+        new_ingress = list(getattr(sec_list, 'ingress_security_rules', []))
+        new_egress = list(getattr(sec_list, 'egress_security_rules', []))
         added = []
 
-        for port in port_list:
-            if port == 'all':
-                # Check if already exists
-                already = any(getattr(r, 'source', '') == cidr and getattr(r, 'protocol', '') == 'all' for r in existing)
-                if not already:
-                    new_rules.append(oci.core.models.IngressSecurityRule(
-                        source=cidr, protocol='all', is_stateless=False,
-                        description='OCI Provisioner: all traffic'
-                    ))
-                    added.append('all')
-            else:
-                already = any(
-                    getattr(r, 'source', '') == cidr and 
-                    getattr(r, 'protocol', '') == '6' and
-                    getattr(getattr(r, 'tcp_options', None), 'destination_port_range', None) and
-                    getattr(getattr(r, 'tcp_options', None), 'destination_port_range').min == int(port)
-                    for r in existing
-                )
-                if not already:
-                    new_rules.append(oci.core.models.IngressSecurityRule(
-                        source=cidr, protocol='6', is_stateless=False,
-                        tcp_options=oci.core.models.TcpOptions(
-                            destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
-                        ),
-                        description='OCI Provisioner: port ' + port
-                    ))
-                    added.append(port)
+        for dir in directions_to_add:
+            existing = new_ingress if dir == 'INGRESS' else new_egress
+            for port in port_list:
+                if port == 'all':
+                    already = any(getattr(r, 'source' if dir == 'INGRESS' else 'destination', '') == cidr and getattr(r, 'protocol', '') == 'all' for r in existing)
+                    if not already:
+                        rule = oci.core.models.IngressSecurityRule(
+                            source=cidr, protocol='all', is_stateless=False,
+                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
+                        ) if dir == 'INGRESS' else oci.core.models.EgressSecurityRule(
+                            destination=cidr, protocol='all', is_stateless=False,
+                            description='OCI Provisioner: ' + dir.lower() + ' all traffic'
+                        )
+                        existing.append(rule)
+                        added.append(dir.lower() + ':all')
+                else:
+                    already = any(
+                        getattr(r, 'source' if dir == 'INGRESS' else 'destination', '') == cidr and 
+                        getattr(r, 'protocol', '') == '6' and
+                        getattr(getattr(r, 'tcp_options', None), 'destination_port_range', None) and
+                        getattr(getattr(r, 'tcp_options', None), 'destination_port_range').min == int(port)
+                        for r in existing
+                    )
+                    if not already:
+                        rule = oci.core.models.IngressSecurityRule(
+                            source=cidr, protocol='6', is_stateless=False,
+                            tcp_options=oci.core.models.TcpOptions(
+                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
+                            ),
+                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
+                        ) if dir == 'INGRESS' else oci.core.models.EgressSecurityRule(
+                            destination=cidr, protocol='6', is_stateless=False,
+                            tcp_options=oci.core.models.TcpOptions(
+                                destination_port_range=oci.core.models.PortRange(min=int(port), max=int(port))
+                            ),
+                            description='OCI Provisioner: ' + dir.lower() + ' port ' + port
+                        )
+                        existing.append(rule)
+                        added.append(dir.lower() + ':' + port)
 
         if not added:
-            return jsonify({'success': True, 'already_open': True, 'message': 'Rule(s) already exist', 'ports': ports, 'cidr': cidr})
+            return jsonify({'success': True, 'already_open': True, 'message': 'Rule(s) already exist', 'ports': ports, 'cidr': cidr, 'direction': direction})
 
         network_client.update_security_list(
             security_list_id=sec_list_ids[0],
             update_security_list_details=oci.core.models.UpdateSecurityListDetails(
-                ingress_security_rules=new_rules
+                ingress_security_rules=new_ingress,
+                egress_security_rules=new_egress
             )
         )
 
@@ -448,7 +470,8 @@ def open_firewall():
             'rules_added': len(added),
             'ports_added': added,
             'ports': ports,
-            'cidr': cidr
+            'cidr': cidr,
+            'direction': direction
         })
 
     except Exception as e:
@@ -484,8 +507,9 @@ def scan_security_rules():
                     'type': 'NSG',
                     'direction': r.direction,
                     'protocol': r.protocol,
-                    'source': getattr(r, 'source', 'N/A'),
-                    'destination': getattr(r, 'destination', 'N/A'),
+                    'source': getattr(r, 'source', 'N/A') if r.direction == 'INGRESS' else 'N/A',
+                    'destination': getattr(r, 'destination', 'N/A') if r.direction == 'EGRESS' else 'N/A',
+                    'port_range': None,  # NSG rules may have port info in tcp_options
                     'description': getattr(r, 'description', '')
                 })
 
@@ -493,6 +517,8 @@ def scan_security_rules():
         sec_list_ids = getattr(subnet, 'security_list_ids', [])
         for sec_id in sec_list_ids:
             sec_list = network_client.get_security_list(security_list_id=sec_id).data
+
+            # Ingress rules
             for r in getattr(sec_list, 'ingress_security_rules', []):
                 tcp_opts = getattr(r, 'tcp_options', None)
                 port_range = None
@@ -506,92 +532,31 @@ def scan_security_rules():
                     'direction': 'INGRESS',
                     'protocol': getattr(r, 'protocol', 'N/A'),
                     'source': getattr(r, 'source', 'N/A'),
+                    'destination': 'N/A',
+                    'port_range': port_range,
+                    'description': getattr(r, 'description', '')
+                })
+
+            # Egress rules
+            for r in getattr(sec_list, 'egress_security_rules', []):
+                tcp_opts = getattr(r, 'tcp_options', None)
+                port_range = None
+                if tcp_opts and getattr(tcp_opts, 'destination_port_range', None):
+                    port_range = str(tcp_opts.destination_port_range.min)
+                    if tcp_opts.destination_port_range.max != tcp_opts.destination_port_range.min:
+                        port_range += '-' + str(tcp_opts.destination_port_range.max)
+
+                rules.append({
+                    'type': 'SecurityList',
+                    'direction': 'EGRESS',
+                    'protocol': getattr(r, 'protocol', 'N/A'),
+                    'source': 'N/A',
+                    'destination': getattr(r, 'destination', 'N/A'),
                     'port_range': port_range,
                     'description': getattr(r, 'description', '')
                 })
 
         return jsonify({'success': True, 'rules': rules, 'nsg_count': len(nsg_ids), 'sec_list_count': len(sec_list_ids)})
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/delete-cidr', methods=['POST'])
-@require_auth
-def delete_cidr():
-    """Delete ingress rules matching a specific source CIDR from NSG or Security List."""
-    data = request.json or {}
-    config = build_config(data)
-    subnet_id = data.get('subnet_id')
-    cidr = data.get('cidr', '').strip()
-
-    if not subnet_id:
-        return jsonify({'success': False, 'error': 'subnet_id required'})
-    if not cidr:
-        return jsonify({'success': False, 'error': 'cidr required'})
-
-    try:
-        oci.config.validate_config(config)
-        network_client = oci.core.VirtualNetworkClient(config)
-
-        subnet = network_client.get_subnet(subnet_id=subnet_id).data
-        rules_removed = 0
-        method = None
-
-        # Try NSG first (modern approach)
-        nsg_ids = getattr(subnet, 'network_security_group_ids', [])
-        if nsg_ids and len(nsg_ids) > 0:
-            nsg_id = nsg_ids[0]
-            nsg_rules = network_client.list_network_security_group_security_rules(
-                network_security_group_id=nsg_id
-            ).data
-
-            to_delete = []
-            for r in nsg_rules:
-                rule_cidr = getattr(r, 'source', '')
-                if rule_cidr == cidr:
-                    to_delete.append(r.id)
-
-            if to_delete:
-                network_client.remove_network_security_group_security_rules(
-                    network_security_group_id=nsg_id,
-                    remove_network_security_group_security_rules_details=oci.core.models.RemoveNetworkSecurityGroupSecurityRulesDetails(
-                        security_rule_ids=to_delete
-                    )
-                )
-                rules_removed = len(to_delete)
-                method = 'NSG'
-
-        # Fallback to Security List (legacy approach)
-        if rules_removed == 0:
-            sec_list_ids = getattr(subnet, 'security_list_ids', [])
-            if sec_list_ids:
-                sec_list = network_client.get_security_list(security_list_id=sec_list_ids[0]).data
-                existing = getattr(sec_list, 'ingress_security_rules', [])
-
-                new_rules = []
-                for r in existing:
-                    rule_cidr = getattr(r, 'source', '')
-                    if rule_cidr == cidr:
-                        rules_removed += 1
-                    else:
-                        new_rules.append(r)
-
-                if rules_removed > 0:
-                    network_client.update_security_list(
-                        security_list_id=sec_list_ids[0],
-                        update_security_list_details=oci.core.models.UpdateSecurityListDetails(
-                            ingress_security_rules=new_rules
-                        )
-                    )
-                    method = 'SecurityList'
-
-        return jsonify({
-            'success': True,
-            'method': method or 'None',
-            'rules_removed': rules_removed,
-            'cidr': cidr
-        })
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
