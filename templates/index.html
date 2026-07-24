@@ -371,9 +371,7 @@
                     <button class="btn" id="quotaBtn" onclick="checkQuota()">Check free tier</button>
                     <button class="btn" id="scanBtn" onclick="scanImages()">Scan OS images</button>
                 </div>
-                <div class="btn-row">
-                    <button class="btn" id="scanSubnetBtn" onclick="scanSubnets()">Scan subnets</button>
-                </div>
+
                 <div id="quotaPanel" class="quota-panel"></div>
                 <div class="checkbox-row">
                     <input type="checkbox" id="allOS" onchange="onAllOSChange()">
@@ -900,7 +898,7 @@
 
     async function scanSubnets() {
         parseConfig();
-        const btn = document.getElementById('scanSubnetBtn');
+        const btn = document.getElementById('scanSubnetBtn2');
         const select = document.getElementById('subnetSelect');
         const info = document.getElementById('subnetInfo');
         const user = document.getElementById('cfgUser').value;
