@@ -440,7 +440,7 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">VM name</label>
-                        <input type="text" id="vmName" class="form-input" value="AlwaysFree-Bot">
+                        <input type="text" id="vmName" class="form-input" value="Arm">
                     </div>
                 </div>
                 <div class="grid-3">
@@ -659,13 +659,44 @@
         const shape = document.getElementById('shapeSelect').value;
         const cpu = document.getElementById('ocpus');
         const ram = document.getElementById('memory');
+        const vmName = document.getElementById('vmName');
+
         if (shape === 'VM.Standard.E2.1.Micro') {
             cpu.value = 1; cpu.disabled = true;
             ram.value = 1; ram.disabled = true;
+            vmName.value = getUniqueVmName('VM-AMD');
         } else {
             cpu.value = 2; cpu.disabled = false;
             ram.value = 12; ram.disabled = false;
+            vmName.value = getUniqueVmName('Arm');
         }
+    }
+
+    function getUniqueVmName(base) {
+        // Check if base name already exists in the current value
+        const vmName = document.getElementById('vmName');
+        const current = vmName.value.trim();
+
+        // If current name already starts with this base, keep it
+        if (current === base || current.startsWith(base + '-')) {
+            return current;
+        }
+
+        // If current name is empty or default, use base
+        if (!current || current === 'AlwaysFree-Bot') {
+            return base;
+        }
+
+        // Otherwise check for duplicates by looking at the current value
+        // Simple logic: if base exists with a number suffix, increment
+        const regex = new RegExp('^' + base + '(-(\d+))?$');
+        const match = current.match(regex);
+        if (match) {
+            const num = match[2] ? parseInt(match[2]) : 1;
+            return base + '-' + (num + 1);
+        }
+
+        return base;
     }
 
     async function setMaxBoot() {
@@ -1302,7 +1333,7 @@
         document.getElementById('vnicSelect').innerHTML = '<option value="">-- Scan VNICs first --</option>';
         document.getElementById('vnicInfo').style.display = 'none';
 
-        document.getElementById('vmName').value = 'AlwaysFree-Bot';
+        document.getElementById('vmName').value = 'Arm';
         document.getElementById('ocpus').value = '2';
         document.getElementById('memory').value = '12';
         document.getElementById('bootVol').value = '50';
